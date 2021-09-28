@@ -245,16 +245,7 @@ int sgx_get_seal_key(uint16_t key_policy, sgx_key_128bit_t* seal_key) {
  * each chunk (of size TRUSTED_CHUNK_SIZE) in the file. The per-chunk hashes are used for partial
  * verification in future reads, to avoid re-verifying the whole file again or the need of caching
  * file contents. */
-DEFINE_LIST(trusted_file);
-struct trusted_file {
-    LIST_TYPE(trusted_file) list;
-    uint64_t size;
-    bool allowed;
-    sgx_file_hash_t file_hash;      /* hash over the whole file, must be the same as in manifest */
-    sgx_chunk_hash_t* chunk_hashes; /* array of hashes over separate file chunks */
-    size_t uri_len;
-    char uri[]; /* must be NULL-terminated */
-};
+
 
 DEFINE_LISTP(trusted_file);
 static LISTP_TYPE(trusted_file) g_trusted_file_list = LISTP_INIT;
