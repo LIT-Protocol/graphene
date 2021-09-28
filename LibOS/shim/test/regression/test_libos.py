@@ -19,6 +19,23 @@ class TC_00_Unittests(RegressionTestCase):
 
         self.assertIn('Test successful!', stdout)
 
+    def test_010_shim_run_test(self):
+        stdout, _ = self.run_binary(['run_test', 'pass'])
+        self.assertIn('shim_run_test("pass") = 0', stdout)
+
+    @unittest.skipUnless(os.environ.get('UBSAN') == '1', 'test only enabled with UBSAN=1')
+    def test_020_ubsan(self):
+        try:
+            self.run_binary(['run_test', 'undefined'])
+            self.fail('run_test unexpectedly succeeded')
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr.decode()
+            self.assertIn('run_test("undefined") ...', stderr,
+                          'Graphene should not abort before attempting to run test')
+            self.assertIn('ubsan: overflow', stderr)
+            self.assertNotIn('run_test("undefined") =', stderr,
+                             'Graphene should abort before returning to application')
+
 class TC_01_Bootstrap(RegressionTestCase):
     def test_001_helloworld(self):
         stdout, _ = self.run_binary(['helloworld'])
@@ -267,37 +284,92 @@ class TC_02_OpenMP(RegressionTestCase):
     'This test is only meaningful on SGX PAL because file-check-policy is '
     'only relevant to SGX.')
 class TC_03_FileCheckPolicy(RegressionTestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open('trusted_testfile', 'w') as f:
+            f.write('trusted_testfile')
+
+    @classmethod
+    def tearDownClass(cls):
+        os.remove('trusted_testfile')
+
     def test_000_strict_success(self):
         stdout, _ = self.run_binary(['file_check_policy_strict', 'read', 'trusted_testfile'])
         self.assertIn('file_check_policy succeeded', stdout)
 
     def test_001_strict_fail(self):
-        with self.expect_returncode(2):
+        try:
             self.run_binary(['file_check_policy_strict', 'read', 'unknown_testfile'])
+            self.fail('expected to return nonzero')
+        except subprocess.CalledProcessError as e:
+            self.assertEqual(e.returncode, 2)
+            stderr = e.stderr.decode()
+            self.assertIn('Disallowing access to file \'unknown_testfile\'', stderr)
 
     def test_002_strict_fail_create(self):
-        with self.expect_returncode(2):
+        if os.path.exists('nonexisting_testfile'):
+            os.remove('nonexisting_testfile')
+        try:
             # this tests a previous bug in Graphene that allowed creating unknown files
-            self.run_binary(['file_check_policy_strict', 'append', 'unknown_testfile'])
+            self.run_binary(['file_check_policy_strict', 'append', 'nonexisting_testfile'])
+            self.fail('expected to return nonzero')
+        except subprocess.CalledProcessError as e:
+            self.assertEqual(e.returncode, 2)
+            stderr = e.stderr.decode()
+            self.assertIn('Disallowing access to file \'nonexisting_testfile\'', stderr)
+            if os.path.exists('nonexisting_testfile'):
+                self.fail('test created a file unexpectedly')
 
-    def test_003_allow_all_but_log_unknown(self):
+    def test_003_strict_fail_write(self):
+        try:
+            # writing to trusted files should not be possible
+            self.run_binary(['file_check_policy_strict', 'write', 'trusted_testfile'])
+            self.fail('expected to return nonzero')
+        except subprocess.CalledProcessError as e:
+            self.assertEqual(e.returncode, 2)
+            stderr = e.stderr.decode()
+            self.assertIn('Disallowing create/write/append to a trusted file \'trusted_testfile\'',
+                          stderr)
+
+    def test_004_allow_all_but_log_unknown(self):
         stdout, stderr = self.run_binary(['file_check_policy_allow_all_but_log', 'read',
                                           'unknown_testfile'])
-        self.assertIn('Allowing access to an unknown file due to file_check_policy settings: '
-                      'file:unknown_testfile', stderr)
+        self.assertIn('Allowing access to unknown file \'unknown_testfile\' due to '
+                      'file_check_policy settings.', stderr)
         self.assertIn('file_check_policy succeeded', stdout)
 
-    def test_004_allow_all_but_log_trusted(self):
+    def test_005_allow_all_but_log_trusted(self):
         stdout, stderr = self.run_binary(['file_check_policy_allow_all_but_log', 'read',
                                           'trusted_testfile'])
-        self.assertNotIn('Allowing access to an unknown file due to file_check_policy settings: '
-                         'file:trusted_testfile', stderr)
+        self.assertNotIn('Allowing access to unknown file \'trusted_testfile\' due to '
+                         'file_check_policy settings.', stderr)
         self.assertIn('file_check_policy succeeded', stdout)
 
-    def test_005_allow_all_but_log_trusted_create_fail(self):
-        with self.expect_returncode(2):
+    def test_006_allow_all_but_log_trusted_create_fail(self):
+        try:
             # this fails because modifying trusted files is prohibited
             self.run_binary(['file_check_policy_allow_all_but_log', 'append', 'trusted_testfile'])
+            self.fail('expected to return nonzero')
+        except subprocess.CalledProcessError as e:
+            self.assertEqual(e.returncode, 2)
+            stderr = e.stderr.decode()
+            self.assertIn('Disallowing create/write/append to a trusted file \'trusted_testfile\'',
+                          stderr)
+
+    def test_007_allow_all_but_log_unknown_create(self):
+        if os.path.exists('nonexisting_testfile'):
+            os.remove('nonexisting_testfile')
+        try:
+            stdout, stderr = self.run_binary(['file_check_policy_allow_all_but_log', 'append',
+                                              'nonexisting_testfile'])
+            self.assertIn('Allowing access to unknown file \'nonexisting_testfile\' due to '
+                          'file_check_policy settings.', stderr)
+            self.assertIn('file_check_policy succeeded', stdout)
+            if not os.path.exists('nonexisting_testfile'):
+                self.fail('test did not create a file')
+        finally:
+            os.remove('nonexisting_testfile')
+
 
 @unittest.skipUnless(HAS_SGX,
     'These tests are only meaningful on SGX PAL because only SGX supports attestation.')
@@ -427,6 +499,23 @@ class TC_30_Syscall(RegressionTestCase):
             # This test generates a 4 GB file, don't leave it in FS.
             os.remove('tmp/large_file')
 
+        self.assertIn('TEST OK', stdout)
+
+    def test_033_rename_chroot(self):
+        file1 = 'tmp/file1'
+        file2 = 'tmp/file2'
+        try:
+            stdout, _ = self.run_binary(['rename', file1, file2])
+        finally:
+            for path in [file1, file2]:
+                if os.path.exists(path):
+                    os.unlink(path)
+        self.assertIn('TEST OK', stdout)
+
+    def test_034_rename_tmpfs(self):
+        file1 = '/mnt/tmpfs/file1'
+        file2 = '/mnt/tmpfs/file2'
+        stdout, _ = self.run_binary(['rename', file1, file2])
         self.assertIn('TEST OK', stdout)
 
     def test_040_futex_bitset(self):
@@ -893,6 +982,11 @@ class TC_80_Socket(RegressionTestCase):
         self.assertIn('[parent] TEST OK', stdout)
 
     def test_100_socket_unix(self):
+        if os.path.exists("dummy"):
+            os.remove("dummy")
+        if os.path.exists("u"):
+            os.remove("u")
+
         stdout, _ = self.run_binary(['unix'])
         self.assertIn('Data: This is packet 0', stdout)
         self.assertIn('Data: This is packet 1', stdout)

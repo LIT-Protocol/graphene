@@ -25,7 +25,7 @@
 #include "shim_utils.h"
 #include "stat.h"
 
-int do_handle_read(struct shim_handle* hdl, void* buf, int count) {
+ssize_t do_handle_read(struct shim_handle* hdl, void* buf, size_t count) {
     if (!(hdl->acc_mode & MAY_READ))
         return -EACCES;
 
@@ -55,7 +55,7 @@ long shim_do_read(int fd, void* buf, size_t count) {
         return shim_do_recvfrom(fd, buf, count, 0, NULL, NULL);
     }
 
-    int ret = do_handle_read(hdl, buf, count);
+    ssize_t ret = do_handle_read(hdl, buf, count);
     put_handle(hdl);
     if (ret == -EINTR) {
         ret = -ERESTARTSYS;
@@ -63,7 +63,7 @@ long shim_do_read(int fd, void* buf, size_t count) {
     return ret;
 }
 
-int do_handle_write(struct shim_handle* hdl, const void* buf, int count) {
+ssize_t do_handle_write(struct shim_handle* hdl, const void* buf, size_t count) {
     if (!(hdl->acc_mode & MAY_WRITE))
         return -EACCES;
 
@@ -87,7 +87,7 @@ long shim_do_write(int fd, const void* buf, size_t count) {
     if (!hdl)
         return -EBADF;
 
-    int ret = do_handle_write(hdl, buf, count);
+    ssize_t ret = do_handle_write(hdl, buf, count);
     put_handle(hdl);
     if (ret == -EINTR) {
         ret = -ERESTARTSYS;
@@ -104,6 +104,10 @@ long shim_do_creat(const char* path, mode_t mode) {
 }
 
 long shim_do_openat(int dfd, const char* filename, int flags, int mode) {
+    if (flags & O_PATH) {
+        return -EINVAL;
+    }
+
     if (!is_user_string_readable(filename))
         return -EFAULT;
 
@@ -156,13 +160,13 @@ long shim_do_close(int fd) {
 }
 
 /* See also `do_getdents`. */
-static off_t do_lseek_dir(struct shim_handle* hdl, off_t offset, int origin) {
+static file_off_t do_lseek_dir(struct shim_handle* hdl, off_t offset, int origin) {
     assert(hdl->is_dir);
 
     lock(&g_dcache_lock);
     lock(&hdl->lock);
 
-    int ret;
+    file_off_t ret;
 
     /* Refresh the directory handle, so that after `lseek` the user sees an updated listing. */
     clear_directory_handle(hdl);
@@ -171,37 +175,12 @@ static off_t do_lseek_dir(struct shim_handle* hdl, off_t offset, int origin) {
 
     struct shim_dir_handle* dirhdl = &hdl->dir_info;
 
-    off_t pos = dirhdl->pos;
-    switch (origin) {
-        case SEEK_SET:
-            if (offset < 0) {
-                ret = -EINVAL;
-                goto out;
-            }
-            pos = offset;
-            break;
-        case SEEK_CUR:
-            if (__builtin_add_overflow(pos, offset, &pos)) {
-                ret = -EOVERFLOW;
-                goto out;
-            }
-            break;
-        case SEEK_END:
-            if (__builtin_add_overflow(dirhdl->count, offset, &pos)) {
-                ret = -EOVERFLOW;
-                goto out;
-            }
-            break;
-        default:
-            ret = -EINVAL;
-            goto out;
-    }
-    if (pos < 0) {
-        ret = -EINVAL;
+    file_off_t pos;
+    ret = generic_seek(dirhdl->pos, dirhdl->count, offset, origin, &pos);
+    if (ret < 0)
         goto out;
-    }
     dirhdl->pos = pos;
-    ret = 0;
+    ret = pos;
 
 out:
     unlock(&hdl->lock);
@@ -263,8 +242,10 @@ long shim_do_pread64(int fd, char* buf, size_t count, loff_t pos) {
     if (!fs->fs_ops->read)
         goto out;
 
-    if (hdl->is_dir)
+    if (hdl->is_dir) {
+        ret = -EISDIR;
         goto out;
+    }
 
     int offset = fs->fs_ops->seek(hdl, 0, SEEK_CUR);
     if (offset < 0) {
@@ -313,8 +294,10 @@ long shim_do_pwrite64(int fd, char* buf, size_t count, loff_t pos) {
     if (!fs->fs_ops->write)
         goto out;
 
-    if (hdl->is_dir)
+    if (hdl->is_dir) {
+        ret = -EISDIR;
         goto out;
+    }
 
     int offset = fs->fs_ops->seek(hdl, 0, SEEK_CUR);
     if (offset < 0) {
@@ -399,8 +382,8 @@ static ssize_t do_getdents(int fd, uint8_t* buf, size_t buf_size, bool is_getden
             name = "..";
             name_len = 2;
         } else {
-            name = qstrgetstr(&dent->name);
-            name_len = dent->name.len;
+            name = dent->name;
+            name_len = dent->name_len;
         }
 
         uint64_t d_ino = dentry_ino(dent);

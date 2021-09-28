@@ -220,7 +220,7 @@ Graphene loudly fails with "out of PAL memory" error. To run huge workloads,
 increase this limit by setting this option to e.g. ``64M`` (this would result in
 a total of 128MB used by Graphene for internal metadata). Note that this limit
 is included in ``sgx.enclave_size``, so if your enclave size is e.g. 512MB and
-you specify ``loader.pal_internal_mem_size = "64MB"``, then your application is
+you specify ``loader.pal_internal_mem_size = "64M"``, then your application is
 left with 384MB of usable memory.
 
 Stack size
@@ -454,7 +454,10 @@ Allowed files
 
 ::
 
-    sgx.allowed_files.[identifier] = "[URI]"
+    sgx.allowed_files = [
+      "[URI]",
+      "[URI]",
+    ]
 
 This syntax specifies the files that are allowed to be created or loaded into
 the enclave unconditionally. In other words, allowed files can be opened for
@@ -471,24 +474,41 @@ Trusted files
 
 ::
 
-    sgx.trusted_files.[identifier] = "[URI]"
+    # entries can be strings
+    sgx.trusted_files = [
+      "[URI]",
+      "[URI]",
+    ]
+
+    # entries can also be tables
+    [[sgx.trusted_files]]
+    uri = "[URI]"
+    sha256 = "[HASH]"
 
 This syntax specifies the files to be cryptographically hashed at build time,
 and allowed to be accessed by the app in runtime only if their hashes match.
 This implies that trusted files can be only opened for reading (not for writing)
 and cannot be created if they do not exist already. The signer tool will
 automatically generate hashes of these files and add them to the SGX-specific
-manifest (``.manifest.sgx``). Marking files as trusted is especially useful for
-shared libraries: a |~| trusted library cannot be silently replaced by a
-malicious host because the hash verification will fail.
+manifest (``.manifest.sgx``). The manifest writer may also specify the hash for
+a file using the TOML-table syntax, in the field ``sha256``; in this case,
+hashing of the file will be skipped by the signer tool and the value in
+``sha256`` field will be used instead.
+
+Marking files as trusted is especially useful for shared libraries: a |~|
+trusted library cannot be silently replaced by a malicious host because the hash
+verification will fail.
 
 Protected files
 ^^^^^^^^^^^^^^^
 
 ::
 
-    sgx.protected_files_key = "sgx_seal_key_mrenclave|sgx_seal_key_mrsigner|[16-byte hex value]"
-    sgx.protected_files.[identifier] = "[URI]"
+    sgx.protected_files_key = "[16-byte hex value]"
+    sgx.protected_files = [
+      "[URI]",
+      "[URI]",
+    ]
 
 This syntax specifies the files that are encrypted on disk and transparently
 decrypted when accessed by Graphene or by application running inside Graphene.
@@ -673,3 +693,20 @@ Linux scheduler: the effective maximum is 250 samples per second.
 .. note::
    This option applies only to ``aex`` mode. In the ``ocall_*`` modes, currently
    all samples are taken.
+
+
+Deprecated options
+------------------
+
+Allowed/Trusted/Protected Files (deprecated schema)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+::
+
+    sgx.allowed_files.[identifier] = "[URI]"
+    sgx.trusted_files.[identifier] = "[URI]"
+    sgx.protected_files.[identifier] = "[URI]"
+
+These manifest options used the TOML-table schema that had a bogus
+``[identifier]`` key. This excessive TOML-table schema was replaced with a more
+appropriate TOML-array one.

@@ -23,7 +23,7 @@ int _DkEventCreate(PAL_HANDLE* handle_ptr, bool init_signaled, bool auto_clear) 
         return -PAL_ERROR_NOMEM;
     }
 
-    SET_HANDLE_TYPE(handle, event);
+    init_handle_hdr(HANDLE_HDR(handle), PAL_TYPE_EVENT);
     handle->event.auto_clear = auto_clear;
     __atomic_store_n(&handle->event.signaled, init_signaled ? 1 : 0, __ATOMIC_RELEASE);
 
@@ -35,9 +35,9 @@ void _DkEventSet(PAL_HANDLE handle) {
     __atomic_store_n(&handle->event.signaled, 1, __ATOMIC_RELEASE);
     /* We could just use `FUTEX_WAKE`, but using `FUTEX_WAKE_BITSET` is more consistent with
      * `FUTEX_WAIT_BITSET` in `_DkEventWait`. */
-    int ret = INLINE_SYSCALL(futex, 6, &handle->event.signaled, FUTEX_WAKE_BITSET,
-                             handle->event.auto_clear ? 1 : INT_MAX, NULL, NULL,
-                             FUTEX_BITSET_MATCH_ANY);
+    int ret = DO_SYSCALL(futex, &handle->event.signaled, FUTEX_WAKE_BITSET,
+                         handle->event.auto_clear ? 1 : INT_MAX, NULL, NULL,
+                         FUTEX_BITSET_MATCH_ANY);
     __UNUSED(ret);
     /* This `FUTEX_WAKE_BITSET` cannot really fail. */
     assert(ret >= 0);
@@ -68,8 +68,8 @@ int _DkEventWait(PAL_HANDLE handle, uint64_t* timeout_us) {
         }
 
         /* Using `FUTEX_WAIT_BITSET` to have an absolute timeout. */
-        ret = INLINE_SYSCALL(futex, 6, &handle->event.signaled, FUTEX_WAIT_BITSET, 0,
-                             timeout_us ? &timeout : NULL, NULL, FUTEX_BITSET_MATCH_ANY);
+        ret = DO_SYSCALL(futex, &handle->event.signaled, FUTEX_WAIT_BITSET, 0,
+                         timeout_us ? &timeout : NULL, NULL, FUTEX_BITSET_MATCH_ANY);
         if (ret < 0 && ret != -EAGAIN) {
             ret = unix_to_pal_error(ret);
             break;

@@ -24,7 +24,6 @@ struct shim_handle;
 #define FS_POLL_RD 0x01
 #define FS_POLL_WR 0x02
 #define FS_POLL_ER 0x04
-#define FS_POLL_SZ 0x08
 
 struct shim_fs_ops {
     /* mount: mount an uri to the certain location */
@@ -48,14 +47,14 @@ struct shim_fs_ops {
     int (*flush)(struct shim_handle* hdl);
 
     /* seek: the content from the file opened as handle */
-    off_t (*seek)(struct shim_handle* hdl, off_t offset, int whence);
+    file_off_t (*seek)(struct shim_handle* hdl, file_off_t offset, int whence);
 
     /* move, copy: rename or duplicate the file */
     int (*move)(const char* trim_old_name, const char* trim_new_name);
     int (*copy)(const char* trim_old_name, const char* trim_new_name);
 
     /* Returns 0 on success, -errno on error */
-    int (*truncate)(struct shim_handle* hdl, off_t len);
+    int (*truncate)(struct shim_handle* hdl, file_off_t len);
 
     /* hstat: get status of the file; `st_ino` will be taken from dentry, if there's one */
     int (*hstat)(struct shim_handle* hdl, struct stat* buf);
@@ -79,10 +78,7 @@ struct shim_fs_ops {
     int (*checkin)(struct shim_handle* hdl);
 
     /* poll a single handle */
-    /* POLL_RD|POLL_WR: return POLL_RD|POLL_WR for readable|writable,
-       POLL_ER for failure, -EAGAIN for unknown. */
-    /* POLL_SZ: return total size */
-    off_t (*poll)(struct shim_handle* hdl, int poll_type);
+    int (*poll)(struct shim_handle* hdl, int poll_type);
 
     /* checkpoint/migrate the file system */
     ssize_t (*checkpoint)(void** checkpoint, void* mount_data);
@@ -92,8 +88,6 @@ struct shim_fs_ops {
 #define DENTRY_VALID       0x0001 /* this dentry is verified to be valid */
 #define DENTRY_NEGATIVE    0x0002 /* recently deleted or inaccessible */
 #define DENTRY_PERSIST     0x0008 /* added as a persistent dentry */
-#define DENTRY_ISLINK      0x0080 /* this dentry is a link */
-#define DENTRY_ISDIRECTORY 0x0100 /* this dentry is a directory */
 #define DENTRY_LOCKED      0x0200 /* locked by mountpoints at children */
 /* These flags are not used */
 //#define DENTRY_REACHABLE    0x0400  /* permission checked to be reachable */
@@ -123,8 +117,9 @@ struct shim_dentry {
     int state; /* flags for managing state */
 
     /* File name, maximum of NAME_MAX characters. By convention, the root has an empty name. Does
-     * not change. */
-    struct shim_qstr name;
+     * not change. Length is kept for performance reasons. */
+    char* name;
+    size_t name_len;
 
     /* Mounted filesystem this dentry belongs to. Does not change. */
     struct shim_mount* mount;
@@ -182,9 +177,6 @@ struct shim_d_ops {
      */
     int (*lookup)(struct shim_dentry* dent);
 
-    /* this is to check file type and access, returning the stat.st_mode */
-    int (*mode)(struct shim_dentry* dent, mode_t* mode);
-
     /* detach internal data from dentry */
     int (*dput)(struct shim_dentry* dent);
 
@@ -202,7 +194,7 @@ struct shim_d_ops {
     int (*stat)(struct shim_dentry* dent, struct stat* buf);
 
     /* extracts the symlink name and saves in link */
-    int (*follow_link)(struct shim_dentry* dent, struct shim_qstr* link);
+    int (*follow_link)(struct shim_dentry* dent, char** out_target);
     /* set up symlink name to a dentry */
     int (*set_link)(struct shim_dentry* dent, const char* link);
 
@@ -252,8 +244,8 @@ struct shim_mount {
 
     struct shim_dentry* mount_point;
 
-    struct shim_qstr path;
-    struct shim_qstr uri;
+    char* path;
+    char* uri;
 
     struct shim_dentry* root;
 
@@ -267,9 +259,6 @@ struct shim_mount {
     LIST_TYPE(shim_mount) list;
 };
 
-/* TODO: This actually does not get migrated after a fork. We migrate `g_process.root`, which is
- * enough for Graphene to function, but leaves `g_dentry_root` in child process pointing to an empty
- * directory. */
 extern struct shim_dentry* g_dentry_root;
 
 #define F_OK 0
@@ -608,10 +597,6 @@ int dentry_abs_path(struct shim_dentry* dent, char** path, size_t* size);
  */
 int dentry_rel_path(struct shim_dentry* dent, char** path, size_t* size);
 
-static inline const char* dentry_get_name(struct shim_dentry* dent) {
-    return qstrgetstr(&dent->name);
-}
-
 ino_t dentry_ino(struct shim_dentry* dent);
 
 /*!
@@ -695,17 +680,19 @@ extern struct shim_fs eventfd_builtin_fs;
 
 struct shim_fs* find_fs(const char* name);
 
-/* string-type file system */
-int str_add_dir(const char* path, mode_t mode, struct shim_dentry** dent);
-int str_add_file(const char* path, mode_t mode, struct shim_dentry** dent);
-int str_open(struct shim_handle* hdl, struct shim_dentry* dent, int flags);
-int str_dput(struct shim_dentry* dent);
-int str_close(struct shim_handle* hdl);
-ssize_t str_read(struct shim_handle* hdl, void* buf, size_t count);
-ssize_t str_write(struct shim_handle* hdl, const void* buf, size_t count);
-off_t str_seek(struct shim_handle* hdl, off_t offset, int whence);
-int str_flush(struct shim_handle* hdl);
-int str_truncate(struct shim_handle* hdl, off_t len);
-off_t str_poll(struct shim_handle* hdl, int poll_type);
+/*!
+ * \brief Compute file position for `seek`
+ *
+ * \param pos current file position (non-negative)
+ * \param size file size (non-negative)
+ * \param offset desired offset
+ * \param origin `seek` origin parameter (SEEK_SET, SEEK_CUR, SEEK_END)
+ * \param[out] out_pos on success, contains new file position
+ *
+ * Computes new file position according to `seek` semantics. The new position will be non-negative,
+ * although it can be larger than file size.
+ */
+int generic_seek(file_off_t pos, file_off_t size, file_off_t offset, int origin,
+                 file_off_t* out_pos);
 
 #endif /* _SHIM_FS_H_ */

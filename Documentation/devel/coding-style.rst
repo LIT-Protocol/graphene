@@ -20,7 +20,7 @@ Usage: (assuming you've configured your build into ``build`` directory)
 
 .. code-block:: sh
 
-   ninja -C build clang-format
+   ninja -C build/ clang-format
 
 This :command:`make` target **reformats all source files in-place**, so we
 recommend you first commit them (or add to `git index
@@ -143,7 +143,7 @@ Conventions and high-level style
 #. Types:
 
     #. All in-memory sizes and array indexes should be stored using ``size_t``.
-    #. All file offsets and sizes should be stored using ``uint64_t``.
+    #. All file offsets and sizes should be stored using ``file_off_t``.
     #. In general, C99 types should be used where possible (although some code
        is "grandfathered" in, it should also be changed as time allows).
 

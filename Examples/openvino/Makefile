@@ -1,15 +1,6 @@
-# Building the manifest for OpenVINO:
-#
-# - make                Build for Linux, OpenVINO with Release build
-# - make DEBUG=1        Build for Linux, OpenVINO with Debug build, Graphene with debug output
-# - make SGX=1          Build for SGX, OpenVINO with Release build
-# - make SGX=1 DEBUG=1  Build for SGX, OpenVINO with Debug build, Graphene with debug output
-#
-# Use `make clean` to remove Graphene-generated files.
-#
-# Use `make distclean` to further remove the OpenVINO source and installation.
-
 THIS_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
+
+ARCH_LIBDIR ?= /lib/$(shell $(CC) -dumpmachine)
 
 MODEL_DIR ?= $(THIS_DIR)model
 MODEL_COMMIT ?= acf297c73db8cb3f68791ae1fad4a7cc4a6039e5     # corresponds to tag "2019_R3"
@@ -18,9 +9,7 @@ MODEL_NAME ?= VGG_VOC0712Plus_SSD_300x300_ft_iter_160000
 OPENVINO_DIR ?= $(THIS_DIR)openvino
 OPENVINO_COMMIT ?= 023e7c2c3f8a8ac83564db09799d2049115d9cf6  # corresponds to tag "2020.4"
 
-# Relative path to Graphene root and key for enclave signing
-GRAPHENE_DIR ?= ../..
-SGX_SIGNER_KEY ?= $(GRAPHENE_DIR)/Pal/src/host/Linux-SGX/signer/enclave-key.pem
+SGX_SIGNER_KEY ?= ../../Pal/src/host/Linux-SGX/signer/enclave-key.pem
 
 ifeq ($(DEBUG),1)
 GRAPHENE_LOG_LEVEL = debug
@@ -37,8 +26,6 @@ ifeq ($(SGX),1)
 all: object_detection_sample_ssd.manifest.sgx object_detection_sample_ssd.sig \
      object_detection_sample_ssd.token
 endif
-
-include ../../Scripts/Makefile.configs
 
 $(MODEL_DIR)/README.md:
 	git clone https://github.com/opencv/open_model_zoo.git $(MODEL_DIR)
@@ -71,10 +58,10 @@ object_detection_sample_ssd.manifest: object_detection_sample_ssd.manifest.templ
 		-Dopenvino_build=$(OPENVINO_BUILD) \
 		$< > $@
 
-# Generating the SGX-specific manifest (object_detection_sample_ssd.manifest.sgx), the enclave signature,
-# and the token for enclave initialization.
 object_detection_sample_ssd.manifest.sgx: object_detection_sample_ssd.manifest \
 		$(OPENVINO_DIR)/inference-engine/bin/intel64/$(OPENVINO_BUILD)/object_detection_sample_ssd
+	@test -s $(SGX_SIGNER_KEY) || \
+	    { echo "SGX signer private key was not found, please specify SGX_SIGNER_KEY!"; exit 1; }
 	graphene-sgx-sign \
 		--key $(SGX_SIGNER_KEY) \
 		--manifest $< \

@@ -10,6 +10,7 @@
 
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "api.h"
 #include "log.h"
@@ -116,7 +117,7 @@ void notify_failure(unsigned long error);
 
 /* all pal config value */
 struct pal_internal_state {
-    PAL_NUM         instance_id;
+    uint64_t        instance_id;
 
     PAL_HANDLE      parent_process;
 
@@ -151,14 +152,13 @@ int add_preloaded_range(uintptr_t start, uintptr_t end, const char* comment);
  * \param arguments         application arguments
  * \param environments      environment variables
  */
-noreturn void pal_main(PAL_NUM instance_id, PAL_HANDLE parent_process, PAL_HANDLE first_thread,
+noreturn void pal_main(uint64_t instance_id, PAL_HANDLE parent_process, PAL_HANDLE first_thread,
                        PAL_STR* arguments, PAL_STR* environments);
 
 /* For initialization */
 
 void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end);
 bool _DkCheckMemoryMappable(const void* addr, size_t size);
-PAL_NUM _DkGetProcessId(void);
 unsigned long _DkMemoryQuota(void);
 unsigned long _DkMemoryAvailableQuota(void);
 // Returns 0 on success, negative PAL code on failure
@@ -239,12 +239,10 @@ int _DkSetProtectedFilesKey(PAL_PTR pf_key_hex);
         _DkProcessExit(exitcode);                                                                \
     } while (0)
 
-#define INIT_FAIL_MANIFEST(exitcode, reason)                                                     \
-    do {                                                                                         \
-        log_error("PAL failed at parsing the manifest: %s\n"                                     \
-                  "  Graphene switched to the TOML format recently, please update the manifest\n"\
-                  "  (in particular, string values must be put in double quotes)", reason);      \
-        _DkProcessExit(exitcode);                                                                \
+#define INIT_FAIL_MANIFEST(exitcode, reason)                           \
+    do {                                                               \
+        log_error("PAL failed at parsing the manifest: %s", reason);   \
+        _DkProcessExit(exitcode);                                      \
     } while (0)
 
 /* Loading ELF binaries */

@@ -130,7 +130,7 @@ static int init_exec_handle(void) {
 
     ret = open_executable(hdl, exec_path);
     if (ret < 0) {
-        log_error("init_exec_handle: error opening executable: %d", ret);
+        log_error("Error opening executable %s: %d", exec_path, ret);
         goto out;
     }
 
@@ -448,8 +448,8 @@ int set_new_fd_handle_above_fd(FDTYPE fd, struct shim_handle* hdl, int fd_flags,
 static inline __attribute__((unused)) const char* __handle_name(struct shim_handle* hdl) {
     if (!qstrempty(&hdl->uri))
         return qstrgetstr(&hdl->uri);
-    if (hdl->dentry && !qstrempty(&hdl->dentry->name))
-        return qstrgetstr(&hdl->dentry->name);
+    if (hdl->dentry && hdl->dentry->name[0] != '\0')
+        return hdl->dentry->name;
     if (hdl->fs)
         return hdl->fs->name;
     return "(unknown)";
@@ -516,15 +516,6 @@ void put_handle(struct shim_handle* hdl) {
 int get_file_size(struct shim_handle* hdl, uint64_t* size) {
     if (!hdl->fs || !hdl->fs->fs_ops)
         return -EINVAL;
-
-    if (hdl->fs->fs_ops->poll) {
-        off_t x = hdl->fs->fs_ops->poll(hdl, FS_POLL_SZ);
-        if (x < 0) {
-            return -EINVAL;
-        }
-        *size = (uint64_t)x;
-        return 0;
-    }
 
     if (hdl->fs->fs_ops->hstat) {
         struct stat stat;
@@ -720,7 +711,7 @@ BEGIN_CP_FUNC(handle) {
         DO_CP_IN_MEMBER(qstr, new_hdl, uri);
 
         if (hdl->dentry) {
-            if (hdl->dentry->state & DENTRY_ISDIRECTORY) {
+            if (hdl->dentry->type == S_IFDIR) {
                 /*
                  * We don't checkpoint children dentries of a directory dentry, so the child process
                  * will need to list the directory again. However, we keep `dir_info.pos` unchanged

@@ -90,11 +90,10 @@ void* migrated_memory_end;
 
 const char** migrated_envp __attribute_migratable;
 
-/* library_paths is populated with LD_PRELOAD entries once during LibOS
- * initialization and is used in __load_interp_object() to search for ELF
- * program interpreter in specific paths. Once allocated, its memory is
- * never freed or updated. */
-char** library_paths = NULL;
+/* `g_library_paths` is populated with LD_PRELOAD entries once during LibOS initialization and is
+ * used in `__load_interp_object()` to search for ELF program interpreter in specific paths. Once
+ * allocated, its memory is never freed or updated. */
+char** g_library_paths = NULL;
 
 struct shim_lock __master_lock;
 bool lock_enabled;
@@ -293,7 +292,7 @@ int init_stack(const char** argv, const char** envp, const char*** out_argp,
     ret = toml_sizestring_in(g_manifest_root, "sys.stack.size", get_rlimit_cur(RLIMIT_STACK),
                              &stack_size);
     if (ret < 0) {
-        log_error("Cannot parse \'sys.stack.size\' (the value must be put in double quotes!)");
+        log_error("Cannot parse 'sys.stack.size'");
         return -EINVAL;
     }
 
@@ -324,7 +323,7 @@ int init_stack(const char** argv, const char** envp, const char*** out_argp,
 static int read_environs(const char** envp) {
     for (const char** e = envp; *e; e++) {
         if (strstartswith(*e, "LD_LIBRARY_PATH=")) {
-            /* populate library_paths with entries from LD_LIBRARY_PATH envvar */
+            /* populate `g_library_paths` with entries from LD_LIBRARY_PATH envvar */
             const char* s = *e + static_strlen("LD_LIBRARY_PATH=");
             size_t npaths = 2; // One for the first entry, one for the last NULL.
             for (const char* tmp = s; *tmp; tmp++)
@@ -352,8 +351,8 @@ static int read_environs(const char** envp) {
 
             paths[cnt] = NULL;
 
-            assert(!library_paths);
-            library_paths = paths;
+            assert(!g_library_paths);
+            g_library_paths = paths;
             return 0;
         }
     }
@@ -377,7 +376,6 @@ noreturn void* shim_init(int argc, void* args) {
     assert(g_pal_control);
 
     g_log_level = g_pal_control->log_level;
-    g_self_vmid = (IDTYPE)g_pal_control->process_id;
 
     /* create the initial TCB, shim can not be run without a tcb */
     shim_tcb_init();
@@ -412,6 +410,7 @@ noreturn void* shim_init(int argc, void* args) {
     RUN_INIT(init_fs_lock);
     RUN_INIT(init_dcache);
     RUN_INIT(init_handle);
+    RUN_INIT(init_r_debug);
 
     log_debug("Shim loaded at %p, ready to initialize", &__load_address);
 
@@ -426,6 +425,8 @@ noreturn void* shim_init(int argc, void* args) {
 
         assert(hdr.size);
         RUN_INIT(receive_checkpoint_and_restore, &hdr);
+    } else {
+        g_process_ipc_ids.self_vmid = STARTING_VMID;
     }
 
     RUN_INIT(init_mount_root);
@@ -444,7 +445,7 @@ noreturn void* shim_init(int argc, void* args) {
     elf_auxv_t* new_auxv;
     RUN_INIT(init_stack, argv, envp, &new_argp, &new_auxv);
 
-    RUN_INIT(init_loader);
+    RUN_INIT(init_elf_objects);
     RUN_INIT(init_signal_handling);
     RUN_INIT(init_ipc_worker);
 
@@ -457,22 +458,21 @@ noreturn void* shim_init(int argc, void* args) {
 
         /* This has also a (very much desired) side effect of the IPC leader making a connection to
          * this process, so that it's included in all broadcast messages. */
-        ret = ipc_change_id_owner(g_process.pid, g_self_vmid);
+        ret = ipc_change_id_owner(g_process.pid, g_process_ipc_ids.self_vmid);
         if (ret < 0) {
             log_debug("shim_init: failed to change child process PID ownership: %d", ret);
             DkProcessExit(1);
         }
 
-        /* Notify the parent process */
-        IDTYPE child_vmid = g_self_vmid;
-        ret = write_exact(g_pal_control->parent_process, &child_vmid, sizeof(child_vmid));
+        /* Notify the parent process we are done. */
+        char dummy_c = 0;
+        ret = write_exact(g_pal_control->parent_process, &dummy_c, sizeof(dummy_c));
         if (ret < 0) {
-            log_error("shim_init: failed to write child_vmid: %d", ret);
+            log_error("shim_init: failed to write ready notification: %d", ret);
             DkProcessExit(1);
         }
 
         /* Wait for parent to settle its adult things. */
-        char dummy_c = 0;
         ret = read_exact(g_pal_control->parent_process, &dummy_c, sizeof(dummy_c));
         if (ret < 0) {
             log_error("shim_init: failed to read parent's confirmation: %d", ret);
@@ -497,16 +497,10 @@ noreturn void* shim_init(int argc, void* args) {
 
     set_default_tls();
 
-    lock(&g_process.fs_lock);
-    struct shim_handle* exec = g_process.exec;
-    get_handle(exec);
-    unlock(&g_process.fs_lock);
-
-    if (exec) {
-        /* Passing ownership of `exec` to `execute_elf_object`. */
-        execute_elf_object(exec, new_argp, new_auxv);
-    }
-    process_exit(0, 0);
+    /* At this point, the exec map has been either copied from checkpoint, or initialized in
+     * `init_loader`. */
+    execute_elf_object(/*exec_map=*/NULL, new_argp, new_auxv);
+    /* UNREACHABLE */
 }
 
 static int get_256b_random_hex_string(char* buf, size_t size) {
@@ -544,7 +538,7 @@ int create_pipe(char* name, char* uri, size_t size, PAL_HANDLE* hdl, struct shim
 
     while (true) {
         if (use_vmid_for_name) {
-            len = snprintf(pipename, sizeof(pipename), "%u", g_self_vmid);
+            len = snprintf(pipename, sizeof(pipename), "%u", g_process_ipc_ids.self_vmid);
             if (len >= sizeof(pipename))
                 return -ERANGE;
         } else {

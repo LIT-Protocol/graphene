@@ -25,22 +25,28 @@ stage('build') {
         make ${MAKEOPTS} ISGX_DRIVER_PATH=/opt/intel/linux-sgx-driver
     '''
 
+    env.MESON_OPTIONS = ''
+    if (env.UBSAN == '1') {
+        env.MESON_OPTIONS += ' -Dubsan=enabled'
+    }
+
     try {
         sh '''
-            meson setup build \
+            meson setup build/ \
                 --prefix="$PREFIX" \
                 --buildtype="$BUILDTYPE" \
                 -Ddirect=disabled \
-                -Dsgx=enabled
-            ninja -vC build
-            ninja -vC build install
+                -Dsgx=enabled \
+                $MESON_OPTIONS
+            ninja -vC build/
+            ninja -vC build/ install
         '''
     } finally {
         archiveArtifacts 'build/meson-logs/**/*'
     }
 
     env.GRAPHENE_PKGLIBDIR = sh(returnStdout: true, script: '''
-    meson introspect build --buildoptions \
+    meson introspect build/ --buildoptions \
     | jq -r '(map(select(.name == "prefix")) + map(select(.name == "libdir"))) | map(.value) | join("/")'
     ''').trim() + '/graphene'
 

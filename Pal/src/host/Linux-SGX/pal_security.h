@@ -13,8 +13,7 @@ typedef char PAL_SEC_STR[255];
 
 struct pal_sec {
     /* host credentials */
-    PAL_NUM instance_id;
-    PAL_IDX ppid, pid, uid, gid;
+    PAL_IDX pid, uid, gid;
 
     /* enclave information */
     sgx_target_info_t qe_targetinfo;
@@ -26,11 +25,9 @@ struct pal_sec {
     /* remaining heap usable by application */
     PAL_PTR heap_min, heap_max;
 
-    /* child's stream FD created and sent over by parent */
+    /* Child's stream FD created and sent over by parent.
+     * If set to `PAL_IDX_POISON`, we have no parent (this is the first process). */
     PAL_IDX stream_fd;
-
-    /* additional information */
-    PAL_SEC_STR pipe_prefix;
 
     PAL_NUM online_logical_cores;
     PAL_NUM possible_logical_cores;

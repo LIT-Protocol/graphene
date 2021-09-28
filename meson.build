@@ -33,6 +33,8 @@ direct = get_option('direct') == 'enabled'
 sgx = get_option('sgx') == 'enabled'
 skeleton = get_option('skeleton') == 'enabled'
 
+ubsan = get_option('ubsan') == 'enabled'
+
 cc = meson.get_compiler('c')
 objcopy = find_program('objcopy')
 
@@ -70,14 +72,36 @@ subdir('Scripts')
 # Not all compilers support mstack-protector-guard, so use stack protector only if supported.
 # Graphene-custom stack protector uses the canary stored in the TCB (same for both in LibOS and PAL)
 # at offset 0x8.
-cflags_custom_stack_protector = [
-    '-fstack-protector-strong',
-    '-mstack-protector-guard=tls',
-    '-mstack-protector-guard-reg=%gs',
-    '-mstack-protector-guard-offset=8',
-]
+if host_machine.cpu_family() == 'x86_64'
+    cflags_custom_stack_protector = [
+        '-fstack-protector-strong',
+        '-mstack-protector-guard=tls',
+        '-mstack-protector-guard-reg=%gs',
+        '-mstack-protector-guard-offset=8',
+    ]
+else
+    cflags_custom_stack_protector = [
+        '-fstack-protector-strong',
+    ]
+endif
+
 if not cc.has_multi_arguments(cflags_custom_stack_protector)
     cflags_custom_stack_protector = '-fno-stack-protector'
+endif
+
+# Don't support b_sanitize: integration with sanitizers in Graphene is tricky and we want more
+# control over the exact flags.
+if get_option('b_sanitize') != 'none'
+    error('Please don\'t use the b_sanitize option; use -Dubsan=enabled instead.')
+endif
+
+cflags_sanitizers = []
+if ubsan
+    cflags_sanitizers += [
+        '-fsanitize=undefined',
+        '-fno-sanitize-recover=undefined',
+        '-DUBSAN',
+    ]
 endif
 
 #

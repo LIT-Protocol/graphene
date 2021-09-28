@@ -32,8 +32,8 @@ struct mount_data {
 };
 
 struct file_sync_data {
-    off_t size;
-    off_t marker;
+    file_off_t size;
+    file_off_t marker;
 };
 
 static void file_sync_lock(struct shim_file_handle* file, int state) {
@@ -203,7 +203,7 @@ static int create_data(struct shim_dentry* dent, const char* uri, size_t len) {
 
     struct mount_data* mdata = DENTRY_MOUNT_DATA(dent);
     assert(mdata);
-    data->type = (dent->state & DENTRY_ISDIRECTORY) ? FILE_DIR : mdata->base_type;
+    data->type = (dent->type == S_IFDIR) ? FILE_DIR : mdata->base_type;
     data->queried = false;
 
     if (uri) {
@@ -238,15 +238,15 @@ static int __query_attr(struct shim_dentry* dent, struct shim_file_data* data,
     mode_t type;
     /* need to correct the data type */
     switch (pal_attr.handle_type) {
-        case pal_type_file:
+        case PAL_TYPE_FILE:
             data->type = FILE_REGULAR;
             type = S_IFREG;
             break;
-        case pal_type_dir:
+        case PAL_TYPE_DIR:
             data->type = FILE_DIR;
             type = S_IFDIR;
             break;
-        case pal_type_dev:
+        case PAL_TYPE_DEV:
             if (strstartswith(qstrgetstr(&data->host_uri) + static_strlen(URI_PREFIX_DEV), "tty")) {
                 data->type = FILE_TTY;
             } else {
@@ -254,8 +254,13 @@ static int __query_attr(struct shim_dentry* dent, struct shim_file_data* data,
             }
             type = S_IFCHR;
             break;
+        case PAL_TYPE_PIPE:
+            log_warning("trying to access '%s' which is a host-level FIFO (named pipe); "
+                        "Graphene supports only named pipes created by Graphene processes",
+                        qstrgetstr(&data->host_uri));
+            return -EACCES;
         default:
-            log_error("unknown PAL handle type: %d", pal_attr.handle_type);
+            log_error("unexpected handle type returned by PAL: %d", pal_attr.handle_type);
             BUG();
     }
 
@@ -273,7 +278,6 @@ static int __query_attr(struct shim_dentry* dent, struct shim_file_data* data,
         /* Move up the uri update; need to convert manifest-level file:
          * directives to 'dir:' uris */
         if (old_type != FILE_DIR) {
-            dent->state |= DENTRY_ISDIRECTORY;
             if ((ret = make_uri(dent)) < 0)
                 return ret;
         }
@@ -313,8 +317,7 @@ static inline int try_create_data(struct shim_dentry* dent, const char* uri, siz
     return 0;
 }
 
-static int query_dentry(struct shim_dentry* dent, PAL_HANDLE pal_handle, mode_t* mode,
-                        struct stat* stat) {
+static int query_dentry(struct shim_dentry* dent, PAL_HANDLE pal_handle, struct stat* stat) {
     int ret = 0;
 
     struct shim_file_data* data;
@@ -327,9 +330,6 @@ static int query_dentry(struct shim_dentry* dent, PAL_HANDLE pal_handle, mode_t*
         unlock(&data->lock);
         return ret;
     }
-
-    if (mode)
-        *mode = dent->type | dent->perm;
 
     if (stat) {
         struct mount_data* mdata = DENTRY_MOUNT_DATA(dent);
@@ -349,16 +349,12 @@ static int query_dentry(struct shim_dentry* dent, PAL_HANDLE pal_handle, mode_t*
     return 0;
 }
 
-static int chroot_mode(struct shim_dentry* dent, mode_t* mode) {
-    return query_dentry(dent, NULL, mode, NULL);
-}
-
 static int chroot_stat(struct shim_dentry* dent, struct stat* statbuf) {
-    return query_dentry(dent, NULL, NULL, statbuf);
+    return query_dentry(dent, NULL, statbuf);
 }
 
 static int chroot_lookup(struct shim_dentry* dent) {
-    return query_dentry(dent, NULL, NULL, NULL);
+    return query_dentry(dent, NULL, NULL);
 }
 
 static int __chroot_open(struct shim_dentry* dent, const char* uri, int flags, mode_t mode,
@@ -435,7 +431,7 @@ static int chroot_open(struct shim_handle* hdl, struct shim_dentry* dent, int fl
 
     assert(hdl->type == TYPE_FILE);
     struct shim_file_handle* file = &hdl->info.file;
-    off_t size = __atomic_load_n(&data->size.counter, __ATOMIC_SEQ_CST);
+    file_off_t size = __atomic_load_n(&data->size.counter, __ATOMIC_SEQ_CST);
 
     /* initialize hdl, does not need a lock because no one is sharing */
     hdl->type     = TYPE_FILE;
@@ -465,7 +461,7 @@ static int chroot_creat(struct shim_handle* hdl, struct shim_dentry* dir, struct
 
     assert(hdl->type == TYPE_FILE);
     struct shim_file_handle* file = &hdl->info.file;
-    off_t size = __atomic_load_n(&data->size.counter, __ATOMIC_SEQ_CST);
+    file_off_t size = __atomic_load_n(&data->size.counter, __ATOMIC_SEQ_CST);
 
     /* initialize hdl, does not need a lock because no one is sharing */
     hdl->type     = TYPE_FILE;
@@ -546,7 +542,7 @@ static inline bool check_version(struct shim_handle* hdl) {
 static void chroot_update_size(struct shim_handle* hdl, struct shim_file_handle* file,
                                struct shim_file_data* data) {
     if (check_version(hdl)) {
-        off_t size;
+        file_off_t size;
         do {
             if ((size = __atomic_load_n(&data->size.counter, __ATOMIC_SEQ_CST)) >= file->size) {
                 file->size = size;
@@ -577,7 +573,7 @@ static int chroot_hstat(struct shim_handle* hdl, struct stat* stat) {
         return 0;
     }
 
-    return query_dentry(hdl->dentry, hdl->pal_handle, NULL, stat);
+    return query_dentry(hdl->dentry, hdl->pal_handle, stat);
 }
 
 static int chroot_flush(struct shim_handle* hdl) {
@@ -606,7 +602,7 @@ static ssize_t chroot_read(struct shim_handle* hdl, void* buf, size_t count) {
 
     struct shim_file_handle* file = &hdl->info.file;
 
-    off_t dummy_off_t;
+    file_off_t dummy_off_t;
     if (file->type != FILE_TTY && file->type != FILE_DEV &&
             __builtin_add_overflow(file->marker, count, &dummy_off_t)) {
         ret = -EFBIG;
@@ -653,7 +649,7 @@ static ssize_t chroot_write(struct shim_handle* hdl, const void* buf, size_t cou
     assert(hdl->type == TYPE_FILE);
     struct shim_file_handle* file = &hdl->info.file;
 
-    off_t dummy_off_t;
+    file_off_t dummy_off_t;
     if (file->type != FILE_TTY && file->type != FILE_DEV &&
             __builtin_add_overflow(file->marker, count, &dummy_off_t)) {
         ret = -EFBIG;
@@ -694,18 +690,14 @@ static int chroot_mmap(struct shim_handle* hdl, void** addr, size_t size, int pr
 
     int pal_prot = LINUX_PROT_TO_PAL(prot, flags);
 
-#if MAP_FILE == 0
     if (flags & MAP_ANONYMOUS)
-#else
-    if (!(flags & MAP_FILE))
-#endif
         return -EINVAL;
 
     return pal_to_unix_errno(DkStreamMap(hdl->pal_handle, addr, pal_prot, offset, size));
 }
 
-static off_t chroot_seek(struct shim_handle* hdl, off_t offset, int whence) {
-    off_t ret = -EINVAL;
+static file_off_t chroot_seek(struct shim_handle* hdl, file_off_t offset, int whence) {
+    file_off_t ret = -EINVAL;
 
     if (NEED_RECREATE(hdl) && (ret = chroot_recreate(hdl)) < 0)
         return ret;
@@ -718,8 +710,8 @@ static off_t chroot_seek(struct shim_handle* hdl, off_t offset, int whence) {
     /* TODO: this function emulates lseek() completely inside the LibOS, but some device files
      *       may report size == 0 during fstat() and may provide device-specific lseek() logic;
      *       this emulation breaks for such device-specific cases */
-    off_t marker = file->marker;
-    off_t size = file->size;
+    file_off_t marker = file->marker;
+    file_off_t size = file->size;
 
     if (check_version(hdl)) {
         struct shim_file_data* data = FILE_HANDLE_DATA(hdl);
@@ -729,21 +721,9 @@ static off_t chroot_seek(struct shim_handle* hdl, off_t offset, int whence) {
         }
     }
 
-    switch (whence) {
-        case SEEK_SET:
-            if (offset < 0)
-                goto out;
-            marker = offset;
-            break;
-
-        case SEEK_CUR:
-            marker += offset;
-            break;
-
-        case SEEK_END:
-            marker = size + offset;
-            break;
-    }
+    ret = generic_seek(marker, size, offset, whence, &marker);
+    if (ret < 0)
+        goto out;
 
     ret = file->marker = marker;
 
@@ -753,7 +733,7 @@ out:
     return ret;
 }
 
-static int chroot_truncate(struct shim_handle* hdl, off_t len) {
+static int chroot_truncate(struct shim_handle* hdl, file_off_t len) {
     int ret = 0;
 
     if (NEED_RECREATE(hdl) && (ret = chroot_recreate(hdl)) < 0)
@@ -943,16 +923,13 @@ static int chroot_unlink(struct shim_dentry* dir, struct shim_dentry* dent) {
     return 0;
 }
 
-static off_t chroot_poll(struct shim_handle* hdl, int poll_type) {
+static int chroot_poll(struct shim_handle* hdl, int poll_type) {
     int ret;
     if (NEED_RECREATE(hdl) && (ret = chroot_recreate(hdl)) < 0)
         return ret;
 
     struct shim_file_data* data = FILE_HANDLE_DATA(hdl);
-    off_t size = __atomic_load_n(&data->size.counter, __ATOMIC_SEQ_CST);
-
-    if (poll_type == FS_POLL_SZ)
-        return size;
+    file_off_t size = __atomic_load_n(&data->size.counter, __ATOMIC_SEQ_CST);
 
     struct shim_file_handle* file = &hdl->info.file;
     lock(&hdl->lock);
@@ -961,7 +938,7 @@ static off_t chroot_poll(struct shim_handle* hdl, int poll_type) {
     if (check_version(hdl) && file->size < size)
         file->size = size;
 
-    off_t marker = file->marker;
+    file_off_t marker = file->marker;
 
     if (file->type == FILE_REGULAR) {
         ret = poll_type & FS_POLL_WR;
@@ -1060,7 +1037,6 @@ struct shim_fs_ops chroot_fs_ops = {
 
 struct shim_d_ops chroot_d_ops = {
     .open    = &chroot_open,
-    .mode    = &chroot_mode,
     .lookup  = &chroot_lookup,
     .creat   = &chroot_creat,
     .mkdir   = &chroot_mkdir,

@@ -1,15 +1,6 @@
-# Use one of these commands to build the manifest for Bash:
-#
-# - make
-# - make DEBUG=1
-# - make SGX=1
-# - make SGX=1 DEBUG=1
-#
-# Use `make clean` to remove Graphene-generated files.
+SGX_SIGNER_KEY ?= ../../Pal/src/host/Linux-SGX/signer/enclave-key.pem
 
-# Relative path to Graphene root and key for enclave signing
-GRAPHENEDIR ?= ../..
-SGX_SIGNER_KEY ?= $(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/enclave-key.pem
+ARCH_LIBDIR ?= /lib/$(shell $(CC) -dumpmachine)
 
 ifeq ($(DEBUG),1)
 GRAPHENE_LOG_LEVEL = debug
@@ -23,8 +14,6 @@ ifeq ($(SGX),1)
 all: bash.manifest.sgx bash.sig bash.token
 endif
 
-include ../../Scripts/Makefile.configs
-
 bash.manifest: manifest.template
 	graphene-manifest \
 		-Dlog_level=$(GRAPHENE_LOG_LEVEL) \
@@ -32,9 +21,9 @@ bash.manifest: manifest.template
 		-Darch_libdir=$(ARCH_LIBDIR) \
 		$< >$@
 
-# Generating the SGX-specific manifest (*.manifest.sgx), the enclave signature,
-# and the token for enclave initialization.
 bash.manifest.sgx: bash.manifest
+	@test -s $(SGX_SIGNER_KEY) || \
+	    { echo "SGX signer private key was not found, please specify SGX_SIGNER_KEY!"; exit 1; }
 	graphene-sgx-sign \
 		--key $(SGX_SIGNER_KEY) \
 		--manifest bash.manifest \

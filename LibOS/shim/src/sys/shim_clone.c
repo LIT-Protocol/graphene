@@ -107,13 +107,14 @@ static BEGIN_MIGRATION_DEF(fork, struct shim_process* process_description,
                            struct shim_thread* thread_description,
                            struct shim_ipc_ids* process_ipc_ids) {
     DEFINE_MIGRATE(process_ipc_ids, process_ipc_ids, sizeof(*process_ipc_ids));
+    DEFINE_MIGRATE(dentry_root, NULL, 0);
     DEFINE_MIGRATE(all_mounts, NULL, 0);
     DEFINE_MIGRATE(all_vmas, NULL, 0);
     DEFINE_MIGRATE(process_description, process_description, sizeof(*process_description));
     DEFINE_MIGRATE(thread, thread_description, sizeof(*thread_description));
     DEFINE_MIGRATE(migratable, NULL, 0);
     DEFINE_MIGRATE(brk, NULL, 0);
-    DEFINE_MIGRATE(loaded_libraries, NULL, 0);
+    DEFINE_MIGRATE(loaded_elf_objects, NULL, 0);
 #ifdef DEBUG
     DEFINE_MIGRATE(gdb_map, NULL, 0);
 #endif
@@ -192,10 +193,11 @@ static long do_clone_new_vm(unsigned long flags, struct shim_thread* thread, uns
     child_process->pid = process_description.pid;
     child_process->child_termination_signal = flags & CSIGNAL;
     child_process->uid = thread->uid;
-    /* `child_process->vmid` is set by the checkpointing function below. */
-
-    long ret = create_process_and_send_checkpoint(&migrate_fork, child_process,
-                                                  &process_description, thread);
+    long ret = ipc_get_new_vmid(&child_process->vmid);
+    if (!ret) {
+        ret = create_process_and_send_checkpoint(&migrate_fork, child_process, &process_description,
+                                                 thread);
+    }
 
     if (parent_stack) {
         pal_context_set_sp(self->shim_tcb->context.regs, parent_stack);
@@ -357,7 +359,7 @@ long shim_do_clone(unsigned long flags, unsigned long user_stack_addr, int* pare
             /* The child process might have already taken the ownership of `tid`, let's change it
              * back (if we still own it, this call will split `tid` from any other range, if it is
              * a part of one)... */
-            int tmp_ret = ipc_change_id_owner(tid, g_self_vmid);
+            int tmp_ret = ipc_change_id_owner(tid, g_process_ipc_ids.self_vmid);
             if (tmp_ret < 0) {
                 log_debug("Failed to change back ID %u owner: %d", tid, tmp_ret);
                 /* No way to recover gracefully. */

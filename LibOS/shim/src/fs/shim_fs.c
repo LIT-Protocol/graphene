@@ -96,14 +96,14 @@ static int __mount_root(void) {
 
     ret = toml_string_in(g_manifest_root, "fs.root.type", &fs_root_type);
     if (ret < 0) {
-        log_error("Cannot parse 'fs.root.type' (the value must be put in double quotes!)");
+        log_error("Cannot parse 'fs.root.type'");
         ret = -EINVAL;
         goto out;
     }
 
     ret = toml_string_in(g_manifest_root, "fs.root.uri", &fs_root_uri);
     if (ret < 0) {
-        log_error("Cannot parse 'fs.root.uri' (the value must be put in double quotes!)");
+        log_error("Cannot parse 'fs.root.uri'");
         ret = -EINVAL;
         goto out;
     }
@@ -189,21 +189,21 @@ static int __mount_one_other(toml_table_t* mount) {
 
     ret = toml_rtos(mount_type_raw, &mount_type);
     if (ret < 0) {
-        log_error("Cannot parse 'fs.mount.%s.type' (the value must be put in double quotes!)", key);
+        log_error("Cannot parse 'fs.mount.%s.type'", key);
         ret = -EINVAL;
         goto out;
     }
 
     ret = toml_rtos(mount_path_raw, &mount_path);
     if (ret < 0) {
-        log_error("Cannot parse 'fs.mount.%s.path' (the value must be put in double quotes!)", key);
+        log_error("Cannot parse 'fs.mount.%s.path'", key);
         ret = -EINVAL;
         goto out;
     }
 
     ret = toml_rtos(mount_uri_raw, &mount_uri);
     if (ret < 0) {
-        log_error("Cannot parse 'fs.mount.%s.uri' (the value must be put in double quotes!)", key);
+        log_error("Cannot parse 'fs.mount.%s.uri'", key);
         ret = -EINVAL;
         goto out;
     }
@@ -223,6 +223,17 @@ static int __mount_one_other(toml_table_t* mount) {
         log_error("Mount points '.' and '..' are not allowed, remove them from manifest.");
         ret = -EINVAL;
         goto out;
+    }
+
+    if (!strcmp(mount_uri, "file:/proc") ||
+            !strcmp(mount_uri, "file:/sys") ||
+            !strcmp(mount_uri, "file:/dev") ||
+            !strncmp(mount_uri, "file:/proc/", strlen("file:/proc/")) ||
+            !strncmp(mount_uri, "file:/sys/", strlen("file:/sys/")) ||
+            !strncmp(mount_uri, "file:/dev/", strlen("file:/dev/"))) {
+        log_error("Mounting %s may expose unsanitized, unsafe files to unsuspecting application. "
+                  "Graphene will continue application execution, but this configuration is not "
+                  "recommended for use in production!", mount_uri);
     }
 
     if ((ret = mount_fs(mount_type, mount_uri, mount_path)) < 0) {
@@ -339,7 +350,7 @@ int init_mount(void) {
     char* fs_start_dir = NULL;
     ret = toml_string_in(g_manifest_root, "fs.start_dir", &fs_start_dir);
     if (ret < 0) {
-        log_error("Can't parse 'fs.start_dir' (note that the value must be put in double quotes)!");
+        log_error("Can't parse 'fs.start_dir'");
         return ret;
     }
 
@@ -399,15 +410,19 @@ static int mount_fs_at_dentry(const char* type, const char* uri, const char* mou
     }
     memset(mount, 0, sizeof(*mount));
 
-    if (!qstrsetstr(&mount->path, mount_path, strlen(mount_path))) {
+    mount->path = strdup(mount_path);
+    if (!mount->path) {
         ret = -ENOMEM;
         goto err;
     }
     if (uri) {
-        if (!qstrsetstr(&mount->uri, uri, strlen(uri))) {
+        mount->uri = strdup(uri);
+        if (!mount->uri) {
             ret = -ENOMEM;
             goto err;
         }
+    } else {
+        mount->uri = NULL;
     }
     mount->fs = fs;
     mount->data = mount_data;
@@ -421,8 +436,7 @@ static int mount_fs_at_dentry(const char* type, const char* uri, const char* mou
 
     /* Initialize root dentry of the new filesystem */
 
-    mount->root = get_new_dentry(mount, /*parent=*/NULL, qstrgetstr(&mount_point->name),
-                                 mount_point->name.len);
+    mount->root = get_new_dentry(mount, /*parent=*/NULL, mount_point->name, mount_point->name_len);
     if (!mount->root) {
         ret = -ENOMEM;
         goto err;
@@ -539,12 +553,13 @@ struct shim_mount* find_mount_from_uri(const char* uri) {
 
     lock(&mount_list_lock);
     LISTP_FOR_EACH_ENTRY(mount, &mount_list, list) {
-        if (qstrempty(&mount->uri))
+        if (!mount->uri)
             continue;
 
-        if (!memcmp(qstrgetstr(&mount->uri), uri, mount->uri.len)) {
-            if (mount->path.len > longest_path) {
-                longest_path = mount->path.len;
+        if (strcmp(mount->uri, uri) == 0) {
+            size_t path_len = strlen(mount->path);
+            if (path_len > longest_path) {
+                longest_path = path_len;
                 found = mount;
             }
         }
@@ -646,8 +661,10 @@ BEGIN_CP_FUNC(mount) {
         INIT_LIST_HEAD(new_mount, list);
         REF_SET(new_mount->ref_count, 0);
 
-        DO_CP_IN_MEMBER(qstr, new_mount, path);
-        DO_CP_IN_MEMBER(qstr, new_mount, uri);
+        DO_CP_MEMBER(str, mount, new_mount, path);
+
+        if (mount->uri)
+            DO_CP_MEMBER(str, mount, new_mount, uri);
 
         if (mount->mount_point)
             DO_CP_MEMBER(dentry, mount, new_mount, mount_point);
@@ -673,6 +690,8 @@ BEGIN_RS_FUNC(mount) {
     CP_REBASE(mount->list);
     CP_REBASE(mount->mount_point);
     CP_REBASE(mount->root);
+    CP_REBASE(mount->path);
+    CP_REBASE(mount->uri);
 
     if (mount->mount_point) {
         get_dentry(mount->mount_point);
@@ -692,11 +711,10 @@ BEGIN_RS_FUNC(mount) {
 
     LISTP_ADD_TAIL(mount, &mount_list, list);
 
-    if (!qstrempty(&mount->path)) {
-        DEBUG_RS("type=%s,uri=%s,path=%s", mount->type, qstrgetstr(&mount->uri),
-                 qstrgetstr(&mount->path));
+    if (mount->path) {
+        DEBUG_RS("type=%s,uri=%s,path=%s", mount->type, mount->uri, mount->path);
     } else {
-        DEBUG_RS("type=%s,uri=%s", mount->type, qstrgetstr(&mount->uri));
+        DEBUG_RS("type=%s,uri=%s", mount->type, mount->uri);
     }
 }
 END_RS_FUNC(mount)

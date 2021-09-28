@@ -1,18 +1,7 @@
-# Build Secret Provisioning client/server example (backed by RA-TLS) as follows:
-#
-# - make          -- build SGX version with apps built in release mode and no logs
-# - make DEBUG=1  -- build SGX version with apps built in debug mode and with logs
-#
-# Any of these invocations clones mbedTLS' git repository (version 2.26.0) and
-# builds it in default configuration. Also, server and client programs are
-# built. See README for details.
-#
-# Use `make clean` to remove Graphene-generated files and `make distclean` to
-# additionally remove the cloned mbedTLS git repository.
-
-# Relative path to Graphene root
 GRAPHENEDIR ?= ../..
-GRAPHENEKEY ?= $(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/enclave-key.pem
+SGX_SIGNER_KEY ?= $(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/enclave-key.pem
+
+ARCH_LIBDIR ?= /lib/$(shell $(CC) -dumpmachine)
 
 # for EPID attestation, specify your SPID and linkable/unlinkable attestation policy;
 # for DCAP/ECDSA attestation, specify SPID as empty string (linkable value is ignored)
@@ -26,8 +15,6 @@ else
 GRAPHENE_LOG_LEVEL = error
 CFLAGS += -O2
 endif
-
-include ../../Scripts/Makefile.configs
 
 .PHONY: clients
 clients: secret_prov_min_client secret_prov_client secret_prov_pf_client
@@ -63,7 +50,7 @@ MBED_BUILD_TYPE=Release
 endif
 
 $(MBEDTLS_SRC):
-	$(GRAPHENEDIR)/Scripts/download --output $@ $(foreach mirror,$(MBEDTLS_URI),--url $(mirror)/$(MBEDTLS_SRC)) --sha256 $(MBEDTLS_CHECKSUM)
+	../common_tools/download --output $@ $(foreach mirror,$(MBEDTLS_URI),--url $(mirror)/$(MBEDTLS_SRC)) --sha256 $(MBEDTLS_CHECKSUM)
 
 .SECONDARY: mbedtls/.mbedtls_downloaded
 mbedtls/.mbedtls_downloaded: $(MBEDTLS_SRC)
@@ -154,8 +141,10 @@ secret_prov_client.manifest: secret_prov_client.manifest.template
 		$< > $@
 
 secret_prov_client.manifest.sgx: secret_prov_client.manifest secret_prov_client libs/.common_libs_copied
+	@test -s $(SGX_SIGNER_KEY) || \
+	    { echo "SGX signer private key was not found, please specify SGX_SIGNER_KEY!"; exit 1; }
 	graphene-sgx-sign \
-		--key $(GRAPHENEKEY) \
+		--key $(SGX_SIGNER_KEY) \
 		--manifest $< \
 		--output $@
 
@@ -175,8 +164,10 @@ secret_prov_min_client.manifest: secret_prov_min_client.manifest.template
 		$< > $@
 
 secret_prov_min_client.manifest.sgx: secret_prov_min_client.manifest secret_prov_min_client libs/.common_libs_copied
+	@test -s $(SGX_SIGNER_KEY) || \
+	    { echo "SGX signer private key was not found, please specify SGX_SIGNER_KEY!"; exit 1; }
 	graphene-sgx-sign \
-		--key $(GRAPHENEKEY) \
+		--key $(SGX_SIGNER_KEY) \
 		--manifest $< \
 		--output $@
 
@@ -201,8 +192,10 @@ secret_prov_pf_client.manifest: secret_prov_pf_client.manifest.template
 		$< > $@
 
 secret_prov_pf_client.manifest.sgx: secret_prov_pf_client.manifest secret_prov_pf_client libs/.common_libs_copied
+	@test -s $(SGX_SIGNER_KEY) || \
+	    { echo "SGX signer private key was not found, please specify SGX_SIGNER_KEY!"; exit 1; }
 	graphene-sgx-sign \
-		--key $(GRAPHENEKEY) \
+		--key $(SGX_SIGNER_KEY) \
 		--manifest $< \
 		--output $@
 
