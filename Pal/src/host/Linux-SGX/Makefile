@@ -17,7 +17,9 @@ CFLAGS += \
 
 # Some of the code uses alignof on expressions, which is a GNU extension.
 # Silence Clang - it complains but does support it.
-CFLAGS += $(cc-option,-Wno-gnu-alignof-expression)
+CFLAGS += $(call cc-option,-Wno-gnu-alignof-expression)
+
+CFLAGS += $(CFLAGS_SANITIZERS)
 
 ASFLAGS += \
 	-I. \
@@ -31,7 +33,7 @@ defs	= -DIN_PAL
 CFLAGS += $(defs)
 ASFLAGS += $(defs)
 
-commons_objs_encl = bogomips.o
+commons_objs_encl = bogomips.o graphene_unix_socket_addr.o
 commons_objs_urts = debug_map.o file_utils.o main_exec_path.o timespec_utils.o topo_info.o
 
 enclave-objs = \
@@ -65,10 +67,10 @@ enclave-objs = \
 enclave-asm-objs = enclave_entry.o
 
 urts-objs = \
-	clone.o \
 	sgx_enclave.o \
 	sgx_exception.o \
 	sgx_framework.o \
+	sgx_gdb_info.o \
 	sgx_log.o \
 	sgx_main.o \
 	sgx_perf_data.o \
@@ -76,9 +78,10 @@ urts-objs = \
 	sgx_process.o \
 	sgx_profile.o \
 	sgx_profile_glibc.o \
-	sgx_gdb_info.o \
+	sgx_syscall.o \
 	sgx_thread.o \
 	quote/aesm.pb-c.o \
+	common_syscall.o \
 	$(commons_objs_urts)
 
 urts-asm-objs = sgx_entry.o
@@ -111,6 +114,9 @@ $(urts-objs): quote/aesm.pb-c.h
 
 $(commons_objs_encl) $(commons_objs_urts): %.o: ../Linux-common/%.c
 	$(call cmd,cc_o_c)
+
+common_syscall.o: ../Linux-common/arch/$(ARCH)/syscall.S
+	$(call cmd,as_o_S)
 
 %.o: %.c
 	$(call cmd,cc_o_c)

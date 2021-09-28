@@ -19,6 +19,8 @@
 #include "ecall_types.h"
 #include "elf/elf.h"
 #include "enclave_pages.h"
+#include "enclave_pf.h"
+#include "enclave_tf.h"
 #include "pal.h"
 #include "pal_defs.h"
 #include "pal_error.h"
@@ -59,10 +61,6 @@ void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end) {
         log_error("Not enough enclave memory, please increase enclave size!");
         ocall_exit(1, /*is_exitgroup=*/true);
     }
-}
-
-PAL_NUM _DkGetProcessId(void) {
-    return g_linux_state.process_id;
 }
 
 #include "dynamic_link.h"
@@ -517,12 +515,20 @@ extern void* g_enclave_top;
 
 /* Graphene uses GCC's stack protector that looks for a canary at gs:[0x8], but this function starts
  * with a default canary and then updates it to a random one, so we disable stack protector here */
-__attribute__((__optimize__("-fno-stack-protector")))
+__attribute_no_stack_protector
 noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char* uptr_args,
                              size_t args_size, char* uptr_env, size_t env_size,
                              struct pal_sec* uptr_sec_info) {
     /* Our arguments are coming directly from the urts. We are responsible to check them. */
     int ret;
+
+    /* Relocate PAL itself (note that this is required to run `log_error`) */
+    g_pal_map.l_addr = elf_machine_load_address();
+    g_pal_map.l_name = "libpal.so"; // to be overriden later
+    elf_get_dynamic_info((void*)g_pal_map.l_addr + elf_machine_dynamic(), g_pal_map.l_info,
+                         g_pal_map.l_addr);
+
+    ELF_DYNAMIC_RELOCATE(&g_pal_map);
 
     uint64_t start_time;
     ret = _DkSystemTimeQuery(&start_time);
@@ -562,24 +568,16 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
     }
     libpal_path[libpal_uri_len] = '\0';
 
-    /* relocate PAL itself */
-    g_pal_map.l_addr = elf_machine_load_address();
+    /* Now that we have `libpal_path`, set name for PAL map */
     g_pal_map.l_name = libpal_path;
-    elf_get_dynamic_info((void*)g_pal_map.l_addr + elf_machine_dynamic(), g_pal_map.l_info,
-                         g_pal_map.l_addr);
-
-    ELF_DYNAMIC_RELOCATE(&g_pal_map);
 
     /*
      * We can't verify the following arguments from the urts. So we copy
      * them directly but need to be careful when we use them.
      */
 
-    g_pal_sec.instance_id = sec_info.instance_id;
-
     g_pal_sec.stream_fd = sec_info.stream_fd;
 
-    COPY_ARRAY(g_pal_sec.pipe_prefix, sec_info.pipe_prefix);
     g_pal_sec.qe_targetinfo = sec_info.qe_targetinfo;
 #ifdef DEBUG
     g_pal_sec.in_gdb = sec_info.in_gdb;
@@ -587,15 +585,7 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
 
     /* For {p,u,g}ids we can at least do some minimal checking. */
 
-    /* ppid should be positive when interpreted as signed. It's 0 if we don't
-     * have a graphene parent process. */
-    if (sec_info.ppid > INT32_MAX) {
-        log_error("Invalid sec_info.ppid: %u", sec_info.ppid);
-        ocall_exit(1, /*is_exitgroup=*/true);
-    }
-    g_pal_sec.ppid = sec_info.ppid;
-
-    /* As ppid but we always have a pid, so 0 is invalid. */
+    /* pid should be positive when interpreted as signed. */
     if (sec_info.pid > INT32_MAX || sec_info.pid == 0) {
         log_error("Invalid sec_info.pid: %u", sec_info.pid);
         ocall_exit(1, /*is_exitgroup=*/true);
@@ -643,8 +633,6 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
 
     g_linux_state.uid = g_pal_sec.uid;
     g_linux_state.gid = g_pal_sec.gid;
-    /* TODO: guard this from malicious host. https://github.com/oscarlab/graphene/issues/2087 */
-    g_linux_state.process_id = g_pal_sec.pid;
 
     SET_ENCLAVE_TLS(ready_for_exceptions, 1UL);
 
@@ -672,8 +660,9 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
 
     /* if there is a parent, create parent handle */
     PAL_HANDLE parent = NULL;
-    if (g_pal_sec.ppid) {
-        if ((ret = init_child_process(&parent)) < 0) {
+    uint64_t instance_id = 0;
+    if (g_pal_sec.stream_fd != PAL_IDX_POISON) {
+        if ((ret = init_child_process(&parent, &instance_id)) < 0) {
             log_error("Failed to initialize child process: %d", ret);
             ocall_exit(1, /*is_exitgroup=*/true);
         }
@@ -693,9 +682,7 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
     char errbuf[256];
     toml_table_t* manifest_root = toml_parse(manifest_addr, errbuf, sizeof(errbuf));
     if (!manifest_root) {
-        log_error("PAL failed at parsing the manifest: %s\n"
-                  "  Graphene switched to the TOML format recently, please update the manifest\n"
-                  "  (in particular, string values must be put in double quotes)", errbuf);
+        log_error("PAL failed at parsing the manifest: %s", errbuf);
         ocall_exit(1, /*is_exitgroup=*/true);
     }
     g_pal_state.raw_manifest_data = manifest_addr;
@@ -705,7 +692,7 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
     ret = toml_bool_in(g_pal_state.manifest_root, "sgx.preheat_enclave", /*defaultval=*/false,
                        &preheat_enclave);
     if (ret < 0) {
-        log_error("Cannot parse \'sgx.preheat_enclave\' (the value must be `true` or `false`)");
+        log_error("Cannot parse 'sgx.preheat_enclave' (the value must be `true` or `false`)");
         ocall_exit(1, true);
     }
     if (preheat_enclave) {
@@ -716,18 +703,22 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
     ret = toml_sizestring_in(g_pal_state.manifest_root, "loader.pal_internal_mem_size",
                              /*defaultval=*/0, &g_pal_internal_mem_size);
     if (ret < 0) {
-        log_error("Cannot parse \'loader.pal_internal_mem_size\' "
-                  "(the value must be put in double quotes!)");
-        ocall_exit(1, true);
-    }
-
-    if ((ret = init_trusted_files()) < 0) {
-        log_error("Failed to load the checksums of trusted files: %d", ret);
+        log_error("Cannot parse 'loader.pal_internal_mem_size'");
         ocall_exit(1, true);
     }
 
     if ((ret = init_file_check_policy()) < 0) {
         log_error("Failed to load the file check policy: %d", ret);
+        ocall_exit(1, true);
+    }
+
+    if ((ret = init_allowed_files()) < 0) {
+        log_error("Failed to initialize allowed files: %d", ret);
+        ocall_exit(1, true);
+    }
+
+    if ((ret = init_trusted_files()) < 0) {
+        log_error("Failed to initialize trusted files: %d", ret);
         ocall_exit(1, true);
     }
 
@@ -742,7 +733,7 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
         log_error("Out of memory");
         ocall_exit(1, true);
     }
-    SET_HANDLE_TYPE(first_thread, thread);
+    init_handle_hdr(HANDLE_HDR(first_thread), PAL_TYPE_THREAD);
     first_thread->thread.tcs = g_enclave_base + GET_ENCLAVE_TLS(tcs_offset);
     /* child threads are assigned TIDs 2,3,...; see pal_start_thread() */
     first_thread->thread.tid = 1;
@@ -761,5 +752,5 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
     g_pal_sec.enclave_flags |= PAL_ENCLAVE_INITIALIZED;
 
     /* call main function */
-    pal_main(g_pal_sec.instance_id, parent, first_thread, arguments, environments);
+    pal_main(instance_id, parent, first_thread, arguments, environments);
 }

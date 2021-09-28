@@ -37,7 +37,7 @@ void log_setprefix(shim_tcb_t* tcb) {
     const char* exec_name;
     if (g_process.exec) {
         if (g_process.exec->dentry) {
-            exec_name = qstrgetstr(&g_process.exec->dentry->name);
+            exec_name = g_process.exec->dentry->name;
         } else {
             /* Unknown executable name */
             exec_name = "?";
@@ -47,7 +47,7 @@ void log_setprefix(shim_tcb_t* tcb) {
         exec_name = "";
     }
 
-    uint32_t vmid = g_self_vmid;
+    uint32_t vmid = g_process_ipc_ids.self_vmid;
     size_t total_len;
     if (tcb->tp) {
         if (!is_internal(tcb->tp)) {
@@ -63,7 +63,7 @@ void log_setprefix(shim_tcb_t* tcb) {
         total_len = snprintf(tcb->log_prefix, ARRAY_SIZE(tcb->log_prefix), "[P%u::%s] ", vmid,
                              exec_name);
     } else {
-        /* unknown process (must never happen): show exec name */
+        /* unknown process (happens on process init): show exec name */
         total_len = snprintf(tcb->log_prefix, ARRAY_SIZE(tcb->log_prefix), "[::%s] ", exec_name);
     }
     if (total_len > ARRAY_SIZE(tcb->log_prefix) - 1) {

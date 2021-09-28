@@ -268,11 +268,17 @@ out_fail:
  * At this point the manifest is assumed to be already parsed, because some PAL loaders use manifest
  * configuration for early initialization.
  */
-noreturn void pal_main(PAL_NUM instance_id,        /* current instance id */
+noreturn void pal_main(uint64_t instance_id,       /* current instance id */
                        PAL_HANDLE parent_process,  /* parent process if it's a child */
                        PAL_HANDLE first_thread,    /* first thread handle */
                        PAL_STR* arguments,         /* application arguments */
                        PAL_STR* environments       /* environment variables */) {
+    if (!instance_id) {
+        assert(!parent_process);
+        if (_DkRandomBitsRead(&instance_id, sizeof(instance_id)) < 0) {
+            INIT_FAIL(PAL_ERROR_DENIED, "Could not generate random instance_id");
+        }
+    }
     g_pal_state.instance_id = instance_id;
     g_pal_state.parent_process = parent_process;
 
@@ -421,7 +427,6 @@ noreturn void pal_main(PAL_NUM instance_id,        /* current instance id */
     }
 
     g_pal_control.host_type       = XSTRINGIFY(HOST_TYPE);
-    g_pal_control.process_id      = _DkGetProcessId();
     g_pal_control.manifest_root   = g_pal_state.manifest_root;
     g_pal_control.parent_process  = parent_process;
     g_pal_control.first_thread    = first_thread;

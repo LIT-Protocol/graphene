@@ -15,12 +15,14 @@
 #include <asm/prctl.h>
 #endif
 
-#include "sysdep-arch.h"
+#include "api.h"
+#include "syscall.h"
 
 /* Graphene uses GCC's stack protector that looks for canary at gs:[0x8], but this function changes
  * the GS register value, so we disable stack protector here (even though it is mostly inlined) */
-__attribute__((__optimize__("-fno-stack-protector"))) static inline int pal_set_tcb(PAL_TCB* tcb) {
-    return INLINE_SYSCALL(arch_prctl, 2, ARCH_SET_GS, tcb);
+__attribute_no_stack_protector
+static inline int pal_set_tcb(PAL_TCB* tcb) {
+    return DO_SYSCALL(arch_prctl, ARCH_SET_GS, tcb);
 }
 
 #endif /* IN_PAL */

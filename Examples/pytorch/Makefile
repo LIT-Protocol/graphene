@@ -1,19 +1,8 @@
-# Build PyTorch as follows:
-#
-# - make               -- create non-SGX no-debug-log manifest
-# - make SGX=1         -- create SGX no-debug-log manifest
-# - make SGX=1 DEBUG=1 -- create SGX debug-log manifest
-#
-# PyTorch and the pre-trained model must be installed on the system.
-# See README for details.
-#
-# Use `make clean` to remove Graphene-generated files.
+# PyTorch and the pre-trained model must be installed on the system. See README for details.
 
+ARCH_LIBDIR ?= /lib/$(shell $(CC) -dumpmachine)
 
-include ../../Scripts/Makefile.configs
-
-GRAPHENEDIR ?= ../..
-SGX_SIGNER_KEY ?= $(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/enclave-key.pem
+SGX_SIGNER_KEY ?= ../../Pal/src/host/Linux-SGX/signer/enclave-key.pem
 
 ifeq ($(DEBUG),1)
 GRAPHENE_LOG_LEVEL = debug
@@ -41,6 +30,8 @@ pytorch.sig pytorch.manifest.sgx: sgx_outputs
 
 .INTERMEDIATE: sgx_outputs
 sgx_outputs: pytorch.manifest
+	@test -s $(SGX_SIGNER_KEY) || \
+	    { echo "SGX signer private key was not found, please specify SGX_SIGNER_KEY!"; exit 1; }
 	graphene-sgx-sign \
 		--key $(SGX_SIGNER_KEY) \
 		--output pytorch.manifest.sgx \
@@ -48,10 +39,6 @@ sgx_outputs: pytorch.manifest
 
 %.token: %.sig
 	graphene-sgx-get-token --output $@ --sig $<
-
-.PHONY: download_model
-download_model:
-	$(PYTHONEXEC) download-pretrained-model.py
 
 .PHONY: clean
 clean:

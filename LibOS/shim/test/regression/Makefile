@@ -74,6 +74,8 @@ c_executables = \
 	pselect \
 	pthread_set_get_affinity \
 	readdir \
+	rename \
+	run_test \
 	sched \
 	sched_set_get_affinity \
 	select \
@@ -129,26 +131,26 @@ extra_rules = \
 include ../../../../Scripts/manifest.mk
 include ../../../../Scripts/Makefile.Test
 
-CFLAGS-bootstrap_static = -static
+CFLAGS-abort_multithread = -pthread
 CFLAGS-bootstrap_pie = -fPIC -pie
+CFLAGS-bootstrap_static = -static
 CFLAGS-debug = -g3
 CFLAGS-debug_regs-x86_64 = -g3
-CFLAGS-exec_same = -pthread
-CFLAGS-shared_object = -fPIC -pie
-CFLAGS-openmp = -fopenmp
-CFLAGS-multi_pthread = -pthread
-CFLAGS-exit_group = -pthread
-CFLAGS-abort_multithread = -pthread
 CFLAGS-eventfd = -pthread
+CFLAGS-exec_same = -pthread
+CFLAGS-exit_group = -pthread
 CFLAGS-futex_bitset = -pthread
 CFLAGS-futex_requeue = -pthread
 CFLAGS-futex_wake_op = -pthread
+CFLAGS-gettimeofday += -pthread
+CFLAGS-multi_pthread = -pthread
 CFLAGS-proc_common = -pthread
-CFLAGS-spinlock += -iquote ../../../../common/include -iquote ../../../../common/include/arch/$(ARCH) -pthread
+CFLAGS-pthread_set_get_affinity += -pthread
+CFLAGS-run_test += -iquote ../../include -iquote ../../include/arch/$(ARCH)
+CFLAGS-shared_object = -fPIC -pie
 CFLAGS-sigaction_per_process += -pthread
 CFLAGS-signal_multithread += -pthread
-CFLAGS-pthread_set_get_affinity += -pthread
-CFLAGS-gettimeofday += -pthread
+CFLAGS-spinlock += -iquote ../../../../common/include -iquote ../../../../common/include/arch/$(ARCH) -pthread
 
 CFLAGS-attestation += -iquote ../../../../common/src/crypto/mbedtls/include \
                       -iquote $(PALDIR)/host/Linux-SGX
@@ -156,6 +158,12 @@ LDLIBS-attestation += ../../../../common/src/crypto/mbedtls/install/lib/libmbedc
 
 CFLAGS-fp_multithread += -pthread -fno-builtin  # see comment in the test's source
 LDLIBS-fp_multithread += -lm
+
+ifeq ($(findstring clang,$(CC)),clang)
+CFLAGS-openmp = -fopenmp=libgomp
+else
+CFLAGS-openmp = -fopenmp
+endif
 
 proc_common: proc_common.o dump.o
 	$(call cmd,cmulti)
@@ -193,5 +201,6 @@ clean-tmp:
 		__pycache__ \
 		libos-regression.xml \
 		testfile \
+		trusted_testfile \
 		tmp/* \
 		*.o

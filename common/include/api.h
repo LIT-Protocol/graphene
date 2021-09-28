@@ -65,6 +65,12 @@ typedef ptrdiff_t ssize_t;
 #define SATURATED_P_SUB(ptr_a, b, limit) \
     ((__typeof__(ptr_a))SATURATED_SUB((uintptr_t)(ptr_a), (uintptr_t)(b), (uintptr_t)(limit)))
 
+#define OVERFLOWS(type, val)                        \
+    ({                                              \
+        type __dummy;                               \
+        __builtin_add_overflow((val), 0, &__dummy); \
+    })
+
 #define IS_POWER_OF_2(x)          \
     ({                            \
         assert((x) != 0);         \
@@ -138,6 +144,14 @@ typedef ptrdiff_t ssize_t;
 
 #define __alloca __builtin_alloca
 
+/* Clang has different syntax than GCC for no-stack-protector, see:
+ * https://reviews.llvm.org/D46300 */
+#ifdef __clang__
+#define __attribute_no_stack_protector __attribute((no_stack_protector))
+#else
+#define __attribute_no_stack_protector __attribute__((__optimize__("-fno-stack-protector")))
+#endif
+
 #define XSTRINGIFY(x) STRINGIFY(x)
 #define STRINGIFY(x)  #x
 
@@ -187,6 +201,8 @@ int atoi(const char* nptr);
 long int atol(const char* nptr);
 
 int islower(int c);
+int isupper(int c);
+int tolower(int c);
 int toupper(int c);
 int isalpha(int c);
 int isdigit(int c);
@@ -322,20 +338,20 @@ extern const char* const* sys_errlist_internal;
 
 /* Graphene functions */
 
-int get_norm_path(const char* path, char* buf, size_t* size);
-int get_base_name(const char* path, char* buf, size_t* size);
+int get_norm_path(const char* path, char* buf, size_t* inout_size);
+int get_base_name(const char* path, char* buf, size_t* inout_size);
 
 /*!
- * \brief Parse a size (number with optional "G"/"M"/"K" suffix) into an unsigned long.
+ * \brief Parse a size (number with optional "G"/"M"/"K" suffix) into an uint64_t.
  *
  * \param str A string containing a non-negative number. The string may end with "G"/"g" suffix
  *            denoting value in GBs, "M"/"m" for MBs, or "K"/"k" for KBs.
+ * \param[out] out_val Parsed size (in bytes).
  *
- * By default the number should be decimal, but if it starts with 0x it is parsed as hexadecimal
- * and if it otherwise starts with 0, it is parsed as octal. Function returns -1 if string cannot
- * be parsed into a size (e.g., suffix is wrong).
+ * The number should be decimal. Returns -1 if string cannot be parsed into a size
+ * (e.g., suffix is wrong).
  */
-int64_t parse_size_str(const char* str);
+int parse_size_str(const char* str, uint64_t* out_val);
 
 /*!
  * \brief Check if a key was specified in TOML manifest.
@@ -426,6 +442,15 @@ int toml_sizestring_in(const toml_table_t* root, const char* key, uint64_t defau
 #define TIME_US_IN_S 1000000ul
 #define TIME_NS_IN_US 1000ul
 #define TIME_NS_IN_S (TIME_NS_IN_US * TIME_US_IN_S)
+
+/* Scrub sensitive memory bufs (memset can be optimized away and memset_s is not available in PAL).
+ * FIXME: This implementation is inefficient (and used in perf-critical functions).
+ * TODO:  Is this really needed? Intel SGX SDK uses similar function as "defense in depth". */
+static inline void erase_memory(void* buffer, size_t size) {
+    volatile unsigned char* p = buffer;
+    while (size--)
+        *p++ = 0;
+}
 
 #ifdef __x86_64__
 static inline bool __range_not_ok(uintptr_t addr, size_t size) {

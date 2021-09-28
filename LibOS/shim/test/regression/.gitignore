@@ -17,6 +17,9 @@
 !large_mmap.manifest
 
 /pal_loader
+/nonexisting_testfile
+/testfile
+/trusted_testfile
 
 /.cache
 /abort
@@ -101,6 +104,8 @@
 /pthread_set_get_affinity
 /rdtsc
 /readdir
+/rename
+/run_test
 /sched
 /sched_set_get_affinity
 /select

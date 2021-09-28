@@ -72,9 +72,6 @@ static inline void init_handle_hdr(PAL_HDR* hdr, int pal_type) {
     hdr->flags = 0;
 }
 
-#define SET_HANDLE_TYPE(handle, t) init_handle_hdr(HANDLE_HDR(handle), pal_type_##t)
-#define IS_HANDLE_TYPE(handle, t)  (HANDLE_HDR(handle)->type == pal_type_##t)
-
 #else
 typedef union pal_handle {
     struct {
@@ -93,27 +90,26 @@ typedef union pal_handle {
 
 /********** PAL TYPE DEFINITIONS **********/
 enum {
-    pal_type_file,
-    pal_type_pipe,
-    pal_type_pipesrv,
-    pal_type_pipecli,
-    pal_type_pipeprv,
-    pal_type_dev,
-    pal_type_dir,
-    pal_type_tcp,
-    pal_type_tcpsrv,
-    pal_type_udp,
-    pal_type_udpsrv,
-    pal_type_process,
-    pal_type_thread,
-    pal_type_event,
-    pal_type_eventfd,
+    PAL_TYPE_FILE,
+    PAL_TYPE_PIPE,
+    PAL_TYPE_PIPESRV,
+    PAL_TYPE_PIPECLI,
+    PAL_TYPE_PIPEPRV,
+    PAL_TYPE_DEV,
+    PAL_TYPE_DIR,
+    PAL_TYPE_TCP,
+    PAL_TYPE_TCPSRV,
+    PAL_TYPE_UDP,
+    PAL_TYPE_UDPSRV,
+    PAL_TYPE_PROCESS,
+    PAL_TYPE_THREAD,
+    PAL_TYPE_EVENT,
+    PAL_TYPE_EVENTFD,
     PAL_HANDLE_TYPE_BOUND,
 };
 
 #define PAL_IDX_POISON         ((PAL_IDX)-1) /* PAL identifier poison value */
 #define PAL_GET_TYPE(h)        (HANDLE_HDR(h)->type)
-#define PAL_CHECK_TYPE(h, t)   (PAL_GET_TYPE(h) == pal_type_##t)
 #define UNKNOWN_HANDLE(handle) (PAL_GET_TYPE(handle) >= PAL_HANDLE_TYPE_BOUND)
 
 typedef struct PAL_PTR_RANGE_ {
@@ -127,7 +123,6 @@ typedef struct PAL_MEM_INFO_ {
 /********** PAL APIs **********/
 typedef struct PAL_CONTROL_ {
     PAL_STR host_type;
-    PAL_NUM process_id; /*!< An identifier of current picoprocess */
 
     /*
      * Handles and executables
@@ -262,11 +257,10 @@ noreturn void DkProcessExit(PAL_NUM exitCode);
 
 /*! Stream Access Flags */
 enum PAL_ACCESS {
-    PAL_ACCESS_RDONLY = 0,
-    PAL_ACCESS_WRONLY = 1,
-    PAL_ACCESS_RDWR   = 2,
-    PAL_ACCESS_APPEND = 4,
-    PAL_ACCESS_MASK   = 7,
+    PAL_ACCESS_RDONLY,
+    PAL_ACCESS_WRONLY,
+    PAL_ACCESS_RDWR,
+    PAL_ACCESS_BOUND,
 };
 
 /*! Stream Sharing Flags */

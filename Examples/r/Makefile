@@ -1,21 +1,10 @@
-# Build the manifest for R:
-#
-# - make                Building for Linux
-# - make DEBUG=1        Building for Linux (with Graphene debug output)
-# - make SGX=1          Building for SGX
-# - make SGX=1 DEBUG=1  Building for SGX (with Graphene debug output)
-#
-# Use `make clean` to remove Graphene-generated files.
-
-# Constants
-
 # Installation location of R. By default, Graphene will run the system R executable.
 R_HOME ?= /usr/lib/R
 R_EXEC = $(R_HOME)/bin/exec/R
 
-# Relative path to Graphene root
-GRAPHENEDIR ?= ../..
-SGX_SIGNER_KEY ?= $(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/enclave-key.pem
+SGX_SIGNER_KEY ?= ../../Pal/src/host/Linux-SGX/signer/enclave-key.pem
+
+ARCH_LIBDIR ?= /lib/$(shell $(CC) -dumpmachine)
 
 ifeq ($(DEBUG),1)
 GRAPHENE_LOG_LEVEL = debug
@@ -32,8 +21,6 @@ ifeq ($(SGX),1)
 all: R.manifest.sgx R.sig R.token
 endif
 
-include ../../Scripts/Makefile.configs
-
 R.manifest: R.manifest.template
 	graphene-manifest \
 		-Dlog_level=$(GRAPHENE_LOG_LEVEL) \
@@ -42,11 +29,9 @@ R.manifest: R.manifest.template
 		-Dr_exec=$(R_EXEC) \
 		$< >$@
 
-# R manifests for SGX:
-#   Generating the SGX-specific manifest (R.manifest.sgx), the enclave signature,
-#   and the token for enclave initialization.
-
 %.manifest.sgx: %.manifest
+	@test -s $(SGX_SIGNER_KEY) || \
+	    { echo "SGX signer private key was not found, please specify SGX_SIGNER_KEY!"; exit 1; }
 	graphene-sgx-sign \
 		--key $(SGX_SIGNER_KEY) \
 		--manifest $< \

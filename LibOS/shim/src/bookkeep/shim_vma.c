@@ -31,8 +31,8 @@
 /* Filter flags that will be saved in `struct shim_vma`. For example there is no need for saving
  * MAP_FIXED or unsupported flags. */
 static int filter_saved_flags(int flags) {
-    return flags & (MAP_SHARED | MAP_SHARED_VALIDATE | MAP_PRIVATE | MAP_ANONYMOUS | MAP_FILE
-                    | MAP_GROWSDOWN | MAP_HUGETLB | MAP_HUGE_2MB | MAP_HUGE_1GB | MAP_STACK
+    return flags & (MAP_SHARED | MAP_SHARED_VALIDATE | MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN
+                    | MAP_HUGETLB | MAP_HUGE_2MB | MAP_HUGE_1GB | MAP_STACK
                     | VMA_UNMAPPED | VMA_INTERNAL | VMA_TAINTED);
 }
 
@@ -700,6 +700,11 @@ int bkeep_munmap(void* addr, size_t length, bool is_internal, void** tmp_vma_ptr
         free_vma(vma2);
     }
 
+    /*
+     * TODO: We call `remove_r_debug()` on the assumption that `addr` might be the beginning of a
+     * loaded ELF object. However, `remove_r_debug()` assumes that `addr` is the load base, while
+     * the first mapping of an ELF object might begin later than its load base.
+     */
     remove_r_debug(addr);
     return ret;
 }

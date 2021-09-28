@@ -12,6 +12,7 @@
 #include <linux/signal.h>
 #include <linux/types.h>
 #include <linux/wait.h>
+#include <stdnoreturn.h>
 
 #include "api.h"
 #include "pal.h"
@@ -78,7 +79,8 @@ out:
  * accepts a TCB pointer to be set to the GS register (on x86-64) of the thread. The rest of the TCB
  * is used as the alternate stack for signal handling. Since Graphene uses GCC's stack protector,
  * and this function modifies the stack protector's GS register, we disable stack protector here. */
-__attribute__((__optimize__("-fno-stack-protector"))) int pal_thread_init(void* tcbptr) {
+__attribute_no_stack_protector
+int pal_thread_init(void* tcbptr) {
     PAL_TCB_LINUX* tcb = tcbptr;
     int ret;
 
@@ -105,7 +107,7 @@ __attribute__((__optimize__("-fno-stack-protector"))) int pal_thread_init(void* 
             .ss_size  = ALT_STACK_SIZE - sizeof(*tcb),
         };
 
-        ret = INLINE_SYSCALL(sigaltstack, 2, &ss, NULL);
+        ret = DO_SYSCALL(sigaltstack, &ss, NULL);
         if (ret < 0)
             return ret;
     }
@@ -114,6 +116,11 @@ __attribute__((__optimize__("-fno-stack-protector"))) int pal_thread_init(void* 
         return (*tcb->callback)(tcb->param);
 
     return 0;
+}
+
+static noreturn void pal_thread_exit_wrapper(int ret_val) {
+    __UNUSED(ret_val);
+    _DkThreadExit(/*clear_child_tid=*/NULL);
 }
 
 int _DkThreadCreate(PAL_HANDLE* handle, int (*callback)(void*), const void* param) {
@@ -149,7 +156,7 @@ int _DkThreadCreate(PAL_HANDLE* handle, int (*callback)(void*), const void* para
         ret = -PAL_ERROR_NOMEM;
         goto err;
     }
-    SET_HANDLE_TYPE(hdl, thread);
+    init_handle_hdr(HANDLE_HDR(hdl), PAL_TYPE_THREAD);
 
     // Initialize TCB at the top of the alternative stack.
     PAL_TCB_LINUX* tcb = child_stack + ALT_STACK_SIZE - sizeof(PAL_TCB_LINUX);
@@ -161,9 +168,9 @@ int _DkThreadCreate(PAL_HANDLE* handle, int (*callback)(void*), const void* para
     // TODO: pal_thread_init() may fail during initialization, we should check its result (but this
     // happens asynchronously, so it's not trivial to do).
     ret = clone(pal_thread_init, child_stack,
-                CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SYSVSEM | CLONE_THREAD | CLONE_SIGHAND |
-                    CLONE_PARENT_SETTID,
-                (void*)tcb, &hdl->thread.tid, NULL);
+                CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SYSVSEM | CLONE_THREAD | CLONE_SIGHAND
+                | CLONE_PARENT_SETTID,
+                tcb, &hdl->thread.tid, /*tls=*/NULL, /*child_tid=*/NULL, pal_thread_exit_wrapper);
 
     if (ret < 0) {
         ret = -PAL_ERROR_DENIED;
@@ -182,7 +189,7 @@ err:
 /* PAL call DkThreadYieldExecution. Yield the execution
    of the current thread. */
 void _DkThreadYieldExecution(void) {
-    INLINE_SYSCALL(sched_yield, 0);
+    DO_SYSCALL(sched_yield);
 }
 
 /* _DkThreadExit for internal use: Thread exiting */
@@ -200,7 +207,7 @@ noreturn void _DkThreadExit(int* clear_child_tid) {
 
         /* take precautions to unset alternate stack; note that we cannot unset the TCB because
          * GCC's stack protector still uses the GS register until the end of this function */
-        INLINE_SYSCALL(sigaltstack, 2, &ss, NULL);
+        DO_SYSCALL(sigaltstack, &ss, NULL);
     }
 
     /* we do not free thread stack but instead mark it as recycled, see get_thread_stack() */
@@ -245,7 +252,7 @@ noreturn void _DkThreadExit(int* clear_child_tid) {
 }
 
 int _DkThreadResume(PAL_HANDLE threadHandle) {
-    int ret = INLINE_SYSCALL(tgkill, 3, g_linux_state.pid, threadHandle->thread.tid, SIGCONT);
+    int ret = DO_SYSCALL(tgkill, g_linux_state.pid, threadHandle->thread.tid, SIGCONT);
 
     if (ret < 0)
         return -PAL_ERROR_DENIED;
@@ -254,13 +261,13 @@ int _DkThreadResume(PAL_HANDLE threadHandle) {
 }
 
 int _DkThreadSetCpuAffinity(PAL_HANDLE thread, PAL_NUM cpumask_size, PAL_PTR cpu_mask) {
-    int ret = INLINE_SYSCALL(sched_setaffinity, 3, thread->thread.tid, cpumask_size, cpu_mask);
+    int ret = DO_SYSCALL(sched_setaffinity, thread->thread.tid, cpumask_size, cpu_mask);
 
     return ret < 0 ? unix_to_pal_error(ret) : ret;
 }
 
 int _DkThreadGetCpuAffinity(PAL_HANDLE thread, PAL_NUM cpumask_size, PAL_PTR cpu_mask) {
-    int ret = INLINE_SYSCALL(sched_getaffinity, 3, thread->thread.tid, cpumask_size, cpu_mask);
+    int ret = DO_SYSCALL(sched_getaffinity, thread->thread.tid, cpumask_size, cpu_mask);
 
     return ret < 0 ? unix_to_pal_error(ret) : ret;
 }

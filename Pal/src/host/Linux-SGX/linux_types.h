@@ -1,19 +1,20 @@
-#ifndef __LINUX_TYPES_H__
-#define __LINUX_TYPES_H__
+#ifndef LINUX_TYPES_H
+#define LINUX_TYPES_H
 
-#include <linux/socket.h>
-#include <linux/time.h>
-#define __timespec_defined
-#undef __USE_POSIX199309
 #include <asm/fcntl.h>
 #include <asm/posix_types.h>
 #include <asm/stat.h>
 #include <linux/poll.h>
 #include <linux/sched.h>
+#include <linux/socket.h>
+#include <linux/time.h>
 #include <linux/uio.h>
 #include <stdint.h>
 
 #include "sigset.h"
+
+typedef __kernel_off_t off_t;
+typedef __kernel_pid_t pid_t;
 
 #ifndef size_t
 typedef __kernel_size_t size_t;
@@ -146,4 +147,4 @@ struct sockaddr_storage {
     char __ss_padding[128 - sizeof(sa_family_t)];
 };
 
-#endif
+#endif /* LINUX_TYPES_H */

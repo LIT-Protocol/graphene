@@ -52,12 +52,12 @@ long shim_do_unlinkat(int dfd, const char* pathname, int flag) {
     }
 
     if (flag & AT_REMOVEDIR) {
-        if (!(dent->state & DENTRY_ISDIRECTORY)) {
+        if (dent->type != S_IFDIR) {
             ret = -ENOTDIR;
             goto out;
         }
     } else {
-        if (dent->state & DENTRY_ISDIRECTORY) {
+        if (dent->type == S_IFDIR) {
             ret = -EISDIR;
             goto out;
         }
@@ -70,9 +70,6 @@ long shim_do_unlinkat(int dfd, const char* pathname, int flag) {
     } else {
         dent->state |= DENTRY_PERSIST;
     }
-
-    if (flag & AT_REMOVEDIR)
-        dent->state &= ~DENTRY_ISDIRECTORY;
 
     dent->state |= DENTRY_NEGATIVE;
 out:
@@ -121,7 +118,7 @@ long shim_do_rmdir(const char* pathname) {
         goto out;
     }
 
-    if (!(dent->state & DENTRY_ISDIRECTORY)) {
+    if (dent->type != S_IFDIR) {
         ret = -ENOTDIR;
         goto out;
     }
@@ -133,7 +130,6 @@ long shim_do_rmdir(const char* pathname) {
         dent->state |= DENTRY_PERSIST;
     }
 
-    dent->state &= ~DENTRY_ISDIRECTORY;
     dent->state |= DENTRY_NEGATIVE;
 out:
     put_dentry(dent);
@@ -272,9 +268,9 @@ static int do_rename(struct shim_dentry* old_dent, struct shim_dentry* new_dent)
         return -EPERM;
     }
 
-    if (old_dent->state & DENTRY_ISDIRECTORY) {
+    if (old_dent->type == S_IFDIR) {
         if (!(new_dent->state & DENTRY_NEGATIVE)) {
-            if (!(new_dent->state & DENTRY_ISDIRECTORY)) {
+            if (new_dent->type != S_IFDIR) {
                 return -ENOTDIR;
             }
             if (new_dent->nchildren > 0) {
@@ -283,9 +279,9 @@ static int do_rename(struct shim_dentry* old_dent, struct shim_dentry* new_dent)
         } else {
             /* destination is a negative dentry and needs to be marked as a directory, since source
              * is a directory */
-            new_dent->state |= DENTRY_ISDIRECTORY;
+            new_dent->type = S_IFDIR;
         }
-    } else if (new_dent->state & DENTRY_ISDIRECTORY) {
+    } else if (new_dent->type == S_IFDIR) {
         return -EISDIR;
     }
 
@@ -407,7 +403,7 @@ long shim_do_sendfile(int out_fd, int in_fd, off_t* offset, size_t count) {
         goto out;
     }
 
-    off_t old_offset = 0;
+    file_off_t old_offset = 0;
 
     if (offset) {
         if (!in_hdl->fs->fs_ops->seek) {
@@ -482,6 +478,9 @@ out:
 }
 
 long shim_do_chroot(const char* filename) {
+    if (!is_user_string_readable(filename))
+        return -EFAULT;
+
     int ret = 0;
     struct shim_dentry* dent = NULL;
     if ((ret = path_lookupat(/*start=*/NULL, filename, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &dent)) < 0)

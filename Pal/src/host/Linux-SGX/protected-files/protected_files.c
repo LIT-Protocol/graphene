@@ -18,18 +18,6 @@
 
 #include "api.h"
 
-/* Function for scrubbing sensitive memory buffers.
- * memset() can be optimized away and memset_s() is not available in PAL.
- * FIXME: this implementation is inefficient (and used in perf-critical functions),
- * replace with a better one.
- * TODO: is this really needed? Intel's implementation uses similar function as "defense in depth".
- */
-static void erase_memory(void* buffer, size_t size) {
-    volatile unsigned char* p = buffer;
-    while (size--)
-        *p++ = 0;
-}
-
 /* Host callbacks */
 static pf_read_f     g_cb_read     = NULL;
 static pf_write_f    g_cb_write    = NULL;
@@ -1006,11 +994,14 @@ static file_node_t* ipf_append_data_node(pf_context_t* pf) {
         return NULL;
     }
 
+    uint64_t node_number, physical_node_number;
+    get_node_numbers(pf->offset, NULL, &node_number, NULL, &physical_node_number);
+
     new_file_data_node->type = FILE_DATA_NODE_TYPE;
     new_file_data_node->new_node = true;
     new_file_data_node->parent = file_mht_node;
-    get_node_numbers(pf->offset, NULL, &new_file_data_node->node_number, NULL,
-                     &new_file_data_node->physical_node_number);
+    new_file_data_node->node_number = node_number;
+    new_file_data_node->physical_node_number = physical_node_number;
 
     if (!lruc_add(pf->cache, new_file_data_node->physical_node_number, new_file_data_node)) {
         free(new_file_data_node);

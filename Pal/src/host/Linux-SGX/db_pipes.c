@@ -13,6 +13,7 @@
 #include "api.h"
 #include "cpu.h"
 #include "crypto.h"
+#include "linux_utils.h"
 #include "pal.h"
 #include "pal_defs.h"
 #include "pal_error.h"
@@ -21,20 +22,6 @@
 #include "pal_linux_defs.h"
 #include "pal_linux_error.h"
 #include "pal_security.h"
-
-static int pipe_addr(const char* name, struct sockaddr_un* addr) {
-    /* use abstract UNIX sockets for pipes, with name format "@/graphene/<pipename>" */
-    addr->sun_family = AF_UNIX;
-    memset(addr->sun_path, 0, sizeof(addr->sun_path));
-
-    /* for abstract sockets, first char is NUL */
-    char* str   = (char*)addr->sun_path + 1;
-    size_t size = sizeof(addr->sun_path) - 1;
-
-    /* pipe_prefix already contains a slash at the end, so not needed in the format string */
-    int ret = snprintf(str, size, "%s%s", g_pal_sec.pipe_prefix, name);
-    return ret >= 0 && (size_t)ret < size ? 0 : -EINVAL;
-}
 
 static int pipe_session_key(PAL_PIPE_NAME* name, PAL_SESSION_KEY* session_key) {
     return lib_HKDF_SHA256((uint8_t*)&g_master_key, sizeof(g_master_key), /*salt=*/NULL,
@@ -46,7 +33,7 @@ static int thread_handshake_func(void* param) {
     PAL_HANDLE handle = (PAL_HANDLE)param;
 
     assert(handle);
-    assert(IS_HANDLE_TYPE(handle, pipe));
+    assert(HANDLE_HDR(handle)->type == PAL_TYPE_PIPE);
     assert(!handle->pipe.ssl_ctx);
     assert(!handle->pipe.handshake_done);
 
@@ -64,7 +51,7 @@ static int thread_handshake_func(void* param) {
 /*!
  * \brief Create a listening abstract UNIX socket as preparation for connecting two ends of a pipe.
  *
- * An abstract UNIX socket with name "@/graphene/<pipename>" is opened for listening. A
+ * An abstract UNIX socket with name "/graphene/<instance_id>/<pipename>" is opened for listening. A
  * corresponding PAL handle with type `pipesrv` is created. This PAL handle typically serves only as
  * an intermediate step to connect two ends of the pipe (`pipecli` and `pipe`). As soon as the other
  * end of the pipe connects to this listening socket, a new accepted socket and the corresponding
@@ -79,7 +66,7 @@ static int pipe_listen(PAL_HANDLE* handle, const char* name, int options) {
     int ret;
 
     struct sockaddr_un addr;
-    ret = pipe_addr(name, &addr);
+    ret = get_graphene_unix_socket_addr(g_pal_state.instance_id, name, &addr);
     if (ret < 0)
         return -PAL_ERROR_DENIED;
 
@@ -98,7 +85,7 @@ static int pipe_listen(PAL_HANDLE* handle, const char* name, int options) {
         return -PAL_ERROR_NOMEM;
     }
 
-    SET_HANDLE_TYPE(hdl, pipesrv);
+    init_handle_hdr(HANDLE_HDR(hdl), PAL_TYPE_PIPESRV);
     HANDLE_HDR(hdl)->flags |= RFD(0); /* cannot write to a listening socket */
     hdl->pipe.fd          = ret;
     hdl->pipe.nonblocking = options & PAL_OPTION_NONBLOCK ? PAL_TRUE : PAL_FALSE;
@@ -131,7 +118,7 @@ static int pipe_listen(PAL_HANDLE* handle, const char* name, int options) {
  * \return             0 on success, negative PAL error code otherwise.
  */
 static int pipe_waitforclient(PAL_HANDLE handle, PAL_HANDLE* client) {
-    if (!IS_HANDLE_TYPE(handle, pipesrv))
+    if (HANDLE_HDR(handle)->type != PAL_TYPE_PIPESRV)
         return -PAL_ERROR_NOTSERVER;
 
     if (handle->pipe.fd == PAL_IDX_POISON)
@@ -148,7 +135,7 @@ static int pipe_waitforclient(PAL_HANDLE handle, PAL_HANDLE* client) {
         return -PAL_ERROR_NOMEM;
     }
 
-    SET_HANDLE_TYPE(clnt, pipecli);
+    init_handle_hdr(HANDLE_HDR(clnt), PAL_TYPE_PIPECLI);
     HANDLE_HDR(clnt)->flags |= RFD(0) | WFD(0);
     clnt->pipe.fd          = ret;
     clnt->pipe.name        = handle->pipe.name;
@@ -184,9 +171,9 @@ static int pipe_waitforclient(PAL_HANDLE handle, PAL_HANDLE* client) {
  * \brief Connect to the other end of the pipe and create PAL handle for our end of the pipe.
  *
  * This function connects to the other end of the pipe, represented as an abstract UNIX socket
- * "@/graphene/<pipename>" opened for listening. When the connection succeeds, a new `pipe` PAL
- * handle is created with the corresponding underlying socket and is returned in `handle`. The other
- * end of the pipe is typically of type `pipecli`.
+ * "/graphene/<instance_id>/<pipename>" opened for listening. When the connection succeeds, a new
+ * `pipe` PAL handle is created with the corresponding underlying socket and is returned in
+ * `handle`. The other end of the pipe is typically of type `pipecli`.
  *
  * \param[out] handle  PAL handle of type `pipe` with abstract UNIX socket connected to another end.
  * \param[in]  name    String uniquely identifying the pipe.
@@ -197,7 +184,7 @@ static int pipe_connect(PAL_HANDLE* handle, const char* name, int options) {
     int ret;
 
     struct sockaddr_un addr;
-    ret = pipe_addr(name, &addr);
+    ret = get_graphene_unix_socket_addr(g_pal_state.instance_id, name, &addr);
     if (ret < 0)
         return -PAL_ERROR_DENIED;
 
@@ -216,7 +203,7 @@ static int pipe_connect(PAL_HANDLE* handle, const char* name, int options) {
         return -PAL_ERROR_NOMEM;
     }
 
-    SET_HANDLE_TYPE(hdl, pipe);
+    init_handle_hdr(HANDLE_HDR(hdl), PAL_TYPE_PIPE);
     HANDLE_HDR(hdl)->flags |= RFD(0) | WFD(0);
     hdl->pipe.fd            = ret;
     hdl->pipe.nonblocking   = (options & PAL_OPTION_NONBLOCK) ? PAL_TRUE : PAL_FALSE;
@@ -279,7 +266,7 @@ static int pipe_private(PAL_HANDLE* handle, int options) {
         return -PAL_ERROR_NOMEM;
     }
 
-    SET_HANDLE_TYPE(hdl, pipeprv);
+    init_handle_hdr(HANDLE_HDR(hdl), PAL_TYPE_PIPEPRV);
     HANDLE_HDR(hdl)->flags  |= RFD(0) | WFD(1); /* first FD for reads, second FD for writes */
     hdl->pipeprv.fds[0]      = fds[0];
     hdl->pipeprv.fds[1]      = fds[1];
@@ -301,11 +288,11 @@ static int pipe_private(PAL_HANDLE* handle, int options) {
  *                                               ends of an anonymous pipe).
  *
  * - `type` is URI_TYPE_PIPE_SRV: create `pipesrv` handle (intermediate listening socket) with
- *                                name in the form of "@/graphene/<uri>". Caller is expected to
- *                                call pipe_waitforclient() afterwards.
+ *                                the name created by `get_graphene_unix_socket_addr`. Caller is
+ *                                expected to call pipe_waitforclient() afterwards.
  *
- * - `type` is URI_TYPE_PIPE: create `pipe` handle (connecting socket) with name in the form of
- *                            "@/graphene/<uri>".
+ * - `type` is URI_TYPE_PIPE: create `pipe` handle (connecting socket) with the name created by
+ *                            `get_graphene_unix_socket_addr`.
  *
  * \param[out] handle  Created PAL handle of type `pipeprv`, `pipesrv`, or `pipe`.
  * \param[in]  type    Can be URI_TYPE_PIPE or URI_TYPE_PIPE_SRV.
@@ -318,7 +305,7 @@ static int pipe_private(PAL_HANDLE* handle, int options) {
  */
 static int pipe_open(PAL_HANDLE* handle, const char* type, const char* uri, int access, int share,
                      int create, int options) {
-    if (!WITHIN_MASK(access, PAL_ACCESS_MASK) || !WITHIN_MASK(share, PAL_SHARE_MASK) ||
+    if (access < 0 || access >= PAL_ACCESS_BOUND || !WITHIN_MASK(share, PAL_SHARE_MASK) ||
         !WITHIN_MASK(create, PAL_CREATE_MASK) || !WITHIN_MASK(options, PAL_OPTION_MASK))
         return -PAL_ERROR_INVAL;
 
@@ -350,12 +337,12 @@ static int64_t pipe_read(PAL_HANDLE handle, uint64_t offset, uint64_t len, void*
     if (offset)
         return -PAL_ERROR_INVAL;
 
-    if (!IS_HANDLE_TYPE(handle, pipecli) && !IS_HANDLE_TYPE(handle, pipeprv) &&
-        !IS_HANDLE_TYPE(handle, pipe))
+    if (HANDLE_HDR(handle)->type != PAL_TYPE_PIPECLI && HANDLE_HDR(handle)->type != PAL_TYPE_PIPEPRV &&
+        HANDLE_HDR(handle)->type != PAL_TYPE_PIPE)
         return -PAL_ERROR_NOTCONNECTION;
 
     ssize_t bytes;
-    if (IS_HANDLE_TYPE(handle, pipeprv)) {
+    if (HANDLE_HDR(handle)->type == PAL_TYPE_PIPEPRV) {
         /* pipeprv are currently not encrypted, see pipe_private() */
         bytes = ocall_recv(handle->pipeprv.fds[0], buffer, len, NULL, NULL, NULL, NULL);
         if (bytes < 0)
@@ -388,12 +375,12 @@ static int64_t pipe_write(PAL_HANDLE handle, uint64_t offset, uint64_t len, cons
     if (offset)
         return -PAL_ERROR_INVAL;
 
-    if (!IS_HANDLE_TYPE(handle, pipecli) && !IS_HANDLE_TYPE(handle, pipeprv) &&
-        !IS_HANDLE_TYPE(handle, pipe))
+    if (HANDLE_HDR(handle)->type != PAL_TYPE_PIPECLI && HANDLE_HDR(handle)->type != PAL_TYPE_PIPEPRV &&
+        HANDLE_HDR(handle)->type != PAL_TYPE_PIPE)
         return -PAL_ERROR_NOTCONNECTION;
 
     ssize_t bytes;
-    if (IS_HANDLE_TYPE(handle, pipeprv)) {
+    if (HANDLE_HDR(handle)->type == PAL_TYPE_PIPEPRV) {
         /* pipeprv are currently not encrypted, see pipe_private() */
         bytes = ocall_send(handle->pipeprv.fds[1], buffer, len, NULL, 0, NULL, 0);
         if (bytes < 0)
@@ -420,7 +407,7 @@ static int64_t pipe_write(PAL_HANDLE handle, uint64_t offset, uint64_t len, cons
  * \return            0 on success, negative PAL error code otherwise.
  */
 static int pipe_close(PAL_HANDLE handle) {
-    if (IS_HANDLE_TYPE(handle, pipeprv)) {
+    if (HANDLE_HDR(handle)->type == PAL_TYPE_PIPEPRV) {
         if (handle->pipeprv.fds[0] != PAL_IDX_POISON) {
             ocall_close(handle->pipeprv.fds[0]);
             handle->pipeprv.fds[0] = PAL_IDX_POISON;
@@ -467,7 +454,7 @@ static int pipe_delete(PAL_HANDLE handle, int access) {
             return -PAL_ERROR_INVAL;
     }
 
-    if (IS_HANDLE_TYPE(handle, pipeprv)) {
+    if (HANDLE_HDR(handle)->type == PAL_TYPE_PIPEPRV) {
         /* pipeprv has two underlying FDs, shut down the requested one(s) */
         if (handle->pipeprv.fds[0] != PAL_IDX_POISON &&
             (shutdown == SHUT_RD || shutdown == SHUT_RDWR)) {
@@ -507,13 +494,13 @@ static int pipe_attrquerybyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
         return -PAL_ERROR_BADHANDLE;
 
     attr->handle_type  = HANDLE_HDR(handle)->type;
-    attr->nonblocking  = IS_HANDLE_TYPE(handle, pipeprv) ? handle->pipeprv.nonblocking
-                                                         : handle->pipe.nonblocking;
+    attr->nonblocking  = HANDLE_HDR(handle)->type == PAL_TYPE_PIPEPRV ? handle->pipeprv.nonblocking
+                                                                      : handle->pipe.nonblocking;
     attr->disconnected = HANDLE_HDR(handle)->flags & ERROR(0);
 
     /* get number of bytes available for reading (doesn't make sense for "listening" pipes) */
     attr->pending_size = 0;
-    if (!IS_HANDLE_TYPE(handle, pipesrv)) {
+    if (HANDLE_HDR(handle)->type != PAL_TYPE_PIPESRV) {
         ret = ocall_fionread(handle->pipe.fd);
         if (ret < 0)
             return unix_to_pal_error(ret);
@@ -522,7 +509,7 @@ static int pipe_attrquerybyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
     }
 
     /* query if there is data available for reading/writing */
-    if (IS_HANDLE_TYPE(handle, pipeprv)) {
+    if (HANDLE_HDR(handle)->type == PAL_TYPE_PIPEPRV) {
         /* for private pipe, readable and writable are queried on different fds */
         struct pollfd pfd[2] = {{.fd = handle->pipeprv.fds[0], .events = POLLIN,  .revents = 0},
                                 {.fd = handle->pipeprv.fds[1], .events = POLLOUT, .revents = 0}};
@@ -540,7 +527,7 @@ static int pipe_attrquerybyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 
         /* for non-private pipes, both readable and writable are queried on the same fd */
         short pfd_events = POLLIN;
-        if (!IS_HANDLE_TYPE(handle, pipesrv)) {
+        if (HANDLE_HDR(handle)->type != PAL_TYPE_PIPESRV) {
             /* querying for writing doesn't make sense for "listening" pipes */
             pfd_events |= POLLOUT;
         }
@@ -570,14 +557,14 @@ static int pipe_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
     if (handle->generic.fds[0] == PAL_IDX_POISON)
         return -PAL_ERROR_BADHANDLE;
 
-    if (!IS_HANDLE_TYPE(handle, pipeprv)) {
+    if (HANDLE_HDR(handle)->type != PAL_TYPE_PIPEPRV) {
         /* This pipe might use a secure session, make sure all initial work is done. */
         while (!__atomic_load_n(&handle->pipe.handshake_done, __ATOMIC_ACQUIRE)) {
             CPU_RELAX();
         }
     }
 
-    PAL_BOL* nonblocking = (HANDLE_HDR(handle)->type == pal_type_pipeprv)
+    PAL_BOL* nonblocking = (HANDLE_HDR(handle)->type == PAL_TYPE_PIPEPRV)
                                ? &handle->pipeprv.nonblocking
                                : &handle->pipe.nonblocking;
 
@@ -610,16 +597,16 @@ static int pipe_getname(PAL_HANDLE handle, char* buffer, size_t count) {
     size_t prefix_len  = 0;
 
     switch (HANDLE_TYPE(handle)) {
-        case pal_type_pipesrv:
-        case pal_type_pipecli:
+        case PAL_TYPE_PIPESRV:
+        case PAL_TYPE_PIPECLI:
             prefix_len = static_strlen(URI_TYPE_PIPE_SRV);
             prefix     = URI_TYPE_PIPE_SRV;
             break;
-        case pal_type_pipe:
+        case PAL_TYPE_PIPE:
             prefix_len = static_strlen(URI_TYPE_PIPE);
             prefix     = URI_TYPE_PIPE;
             break;
-        case pal_type_pipeprv:
+        case PAL_TYPE_PIPEPRV:
         default:
             return -PAL_ERROR_INVAL;
     }

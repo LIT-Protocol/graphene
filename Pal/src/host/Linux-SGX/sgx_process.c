@@ -19,56 +19,42 @@
 #include "sgx_enclave.h"
 #include "sgx_internal.h"
 #include "sgx_log.h"
+#include "sgx_process.h"
 #include "sgx_tls.h"
 
 extern char* g_pal_loader_path;
 extern char* g_libpal_path;
 
 struct proc_args {
-    unsigned int instance_id;
-    unsigned int parent_process_id;
     int          stream_fd;
-    PAL_SEC_STR  pipe_prefix;
     size_t       application_path_size; // application path will follow this struct on the pipe.
     size_t       manifest_size; // manifest will follow application path on the pipe.
 };
 
-/*
- * vfork() shares stack between child and parent. Any stack modifications in
- * child are reflected in parent's stack. Compiler may unwittingly modify
- * child's stack for its own purposes and thus corrupt parent's stack
- * (e.g., GCC re-uses the same stack area for local vars with non-overlapping
- * lifetimes).
- * Introduce noinline function with stack area used only by child.
- * Make this function non-local to keep function signature.
- * NOTE: more tricks may be needed to prevent unexpected optimization for
- * future compiler.
- */
-static int __attribute_noinline vfork_exec(int parent_stream, const char** argv) {
-    int ret = ARCH_VFORK();
+static int vfork_exec(const char** argv) {
+    int ret = vfork();
     if (ret)
         return ret;
 
-    /* child: close parent's FDs and execve */
-    INLINE_SYSCALL(close, 1, parent_stream);
-
     extern char** environ;
-    ret = INLINE_SYSCALL(execve, 3, g_pal_loader_path, argv, environ);
-
-    /* shouldn't get to here */
-    log_error("unexpected failure of execve");
-    __asm__ volatile("hlt");
-    return 0;
+    DO_SYSCALL(execve, g_pal_loader_path, argv, environ);
+    DO_SYSCALL(exit_group, 1);
+    die_or_inf_loop();
 }
 
 int sgx_create_process(size_t nargs, const char** args, int* stream_fd, const char* manifest) {
-    int ret, rete, child;
+    int ret, rete;
     int fds[2] = {-1, -1};
 
     int socktype = SOCK_STREAM;
-    ret = INLINE_SYSCALL(socketpair, 4, AF_UNIX, socktype, 0, fds);
+    ret = DO_SYSCALL(socketpair, AF_UNIX, socktype, 0, fds);
     if (ret < 0)
         goto out;
+
+    ret = DO_SYSCALL(fcntl, fds[1], F_SETFD, FD_CLOEXEC);
+    if (ret < 0) {
+        goto out;
+    }
 
     const char** argv = __alloca(sizeof(const char*) * (nargs + 5));
     argv[0] = g_pal_loader_path;
@@ -83,34 +69,28 @@ int sgx_create_process(size_t nargs, const char** args, int* stream_fd, const ch
     /* child's signal handler may mess with parent's memory during vfork(), so block signals */
     ret = block_async_signals(true);
     if (ret < 0) {
-        ret = -ret;
         goto out;
     }
 
-    ret = vfork_exec(/*parent_stream=*/fds[1], argv);
+    ret = vfork_exec(argv);
     if (ret < 0)
         goto out;
 
     /* parent continues here */
-    child = ret;
 
     /* children unblock async signals by sgx_signal_setup() */
     ret = block_async_signals(false);
     if (ret < 0) {
-        ret = -ret;
         goto out;
     }
 
-    INLINE_SYSCALL(close, 1, fds[0]); /* child stream */
+    /* TODO: add error checking. */
+    DO_SYSCALL(close, fds[0]); /* child stream */
 
-    struct pal_sec* pal_sec = &g_pal_enclave.pal_sec;
     struct proc_args proc_args;
-    proc_args.instance_id       = pal_sec->instance_id;
-    proc_args.parent_process_id = pal_sec->pid;
     proc_args.stream_fd         = fds[0];
     proc_args.application_path_size = strlen(g_pal_enclave.application_path);
     proc_args.manifest_size     = strlen(manifest);
-    memcpy(proc_args.pipe_prefix, pal_sec->pipe_prefix, sizeof(PAL_SEC_STR));
 
     ret = write_all(fds[1], &proc_args, sizeof(struct proc_args));
     if (ret < 0) {
@@ -137,18 +117,16 @@ int sgx_create_process(size_t nargs, const char** args, int* stream_fd, const ch
         goto out;
     }
 
-    INLINE_SYSCALL(fcntl, 3, fds[1], F_SETFD, FD_CLOEXEC);
-
     if (stream_fd)
         *stream_fd = fds[1];
 
-    ret = child;
+    ret = 0;
 out:
     if (ret < 0) {
         if (fds[0] >= 0)
-            INLINE_SYSCALL(close, 1, fds[0]);
+            DO_SYSCALL(close, fds[0]);
         if (fds[1] >= 0)
-            INLINE_SYSCALL(close, 1, fds[1]);
+            DO_SYSCALL(close, fds[1]);
     }
 
     return ret;
@@ -196,16 +174,16 @@ int sgx_init_child_process(int parent_pipe_fd, struct pal_sec* pal_sec, char** a
         goto out;
     }
 
-    pal_sec->instance_id = proc_args.instance_id;
-    pal_sec->ppid        = proc_args.parent_process_id;
     pal_sec->stream_fd   = proc_args.stream_fd;
-    memcpy(pal_sec->pipe_prefix, proc_args.pipe_prefix, sizeof(PAL_SEC_STR));
 
     *application_path_out = application_path;
     *manifest_out = manifest;
     ret = 0;
 out:
-    if (ret < 0)
+    if (ret < 0) {
+        free(application_path);
         free(manifest);
+    }
+
     return ret;
 }

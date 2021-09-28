@@ -71,7 +71,7 @@ int handle_set_cloexec(PAL_HANDLE handle, bool enable) {
     for (int i = 0; i < MAX_FDS; i++)
         if (HANDLE_HDR(handle)->flags & (RFD(i) | WFD(i))) {
             long flags = enable ? FD_CLOEXEC : 0;
-            int ret = INLINE_SYSCALL(fcntl, 3, handle->generic.fds[i], F_SETFD, flags);
+            int ret = DO_SYSCALL(fcntl, handle->generic.fds[i], F_SETFD, flags);
             if (ret < 0 && ret != -EBADF)
                 return -PAL_ERROR_DENIED;
         }
@@ -83,7 +83,7 @@ int handle_set_cloexec(PAL_HANDLE handle, bool enable) {
    The memory is unmapped as a whole.*/
 int _DkStreamUnmap(void* addr, uint64_t size) {
     /* Just let the kernel tell us if the mapping isn't good. */
-    int ret = INLINE_SYSCALL(munmap, 2, addr, size);
+    int ret = DO_SYSCALL(munmap, addr, size);
 
     if (ret < 0)
         return -PAL_ERROR_DENIED;
@@ -100,29 +100,29 @@ int handle_serialize(PAL_HANDLE handle, void** data) {
     /* find fields to serialize (depends on the handle type) and assign them to d1/d2; note that
      * no handle type has more than two such fields, and some have none at all */
     switch (PAL_GET_TYPE(handle)) {
-        case pal_type_file:
+        case PAL_TYPE_FILE:
             d1   = handle->file.realpath;
             dsz1 = strlen(handle->file.realpath) + 1;
             break;
-        case pal_type_pipe:
-        case pal_type_pipesrv:
-        case pal_type_pipecli:
-        case pal_type_pipeprv:
+        case PAL_TYPE_PIPE:
+        case PAL_TYPE_PIPESRV:
+        case PAL_TYPE_PIPECLI:
+        case PAL_TYPE_PIPEPRV:
             /* pipes have no fields to serialize */
             break;
-        case pal_type_dev:
+        case PAL_TYPE_DEV:
             /* devices have no fields to serialize */
             break;
-        case pal_type_dir:
+        case PAL_TYPE_DIR:
             if (handle->dir.realpath) {
                 d1   = handle->dir.realpath;
                 dsz1 = strlen(handle->dir.realpath) + 1;
             }
             break;
-        case pal_type_tcp:
-        case pal_type_tcpsrv:
-        case pal_type_udp:
-        case pal_type_udpsrv:
+        case PAL_TYPE_TCP:
+        case PAL_TYPE_TCPSRV:
+        case PAL_TYPE_UDP:
+        case PAL_TYPE_UDPSRV:
             if (handle->sock.bind) {
                 d1   = (const void*)handle->sock.bind;
                 dsz1 = addr_size(handle->sock.bind);
@@ -132,8 +132,8 @@ int handle_serialize(PAL_HANDLE handle, void** data) {
                 dsz2 = addr_size(handle->sock.conn);
             }
             break;
-        case pal_type_process:
-        case pal_type_eventfd:
+        case PAL_TYPE_PROCESS:
+        case PAL_TYPE_EVENTFD:
             break;
         default:
             return -PAL_ERROR_INVAL;
@@ -165,23 +165,23 @@ int handle_deserialize(PAL_HANDLE* handle, const void* data, size_t size) {
 
     /* update handle fields to point to correct contents (located right after handle itself) */
     switch (PAL_GET_TYPE(hdl)) {
-        case pal_type_file:
+        case PAL_TYPE_FILE:
             hdl->file.realpath = hdl->file.realpath ? (PAL_STR)hdl + hdlsz : NULL;
             break;
-        case pal_type_pipe:
-        case pal_type_pipesrv:
-        case pal_type_pipecli:
-        case pal_type_pipeprv:
+        case PAL_TYPE_PIPE:
+        case PAL_TYPE_PIPESRV:
+        case PAL_TYPE_PIPECLI:
+        case PAL_TYPE_PIPEPRV:
             break;
-        case pal_type_dev:
+        case PAL_TYPE_DEV:
             break;
-        case pal_type_dir:
+        case PAL_TYPE_DIR:
             hdl->dir.realpath = hdl->dir.realpath ? (PAL_STR)hdl + hdlsz : NULL;
             break;
-        case pal_type_tcp:
-        case pal_type_tcpsrv:
-        case pal_type_udp:
-        case pal_type_udpsrv: {
+        case PAL_TYPE_TCP:
+        case PAL_TYPE_TCPSRV:
+        case PAL_TYPE_UDP:
+        case PAL_TYPE_UDPSRV: {
             size_t s1 = hdl->sock.bind ? addr_size((PAL_PTR)hdl + hdlsz) : 0;
             size_t s2 = hdl->sock.conn ? addr_size((PAL_PTR)hdl + hdlsz + s1) : 0;
             if (s1)
@@ -190,8 +190,8 @@ int handle_deserialize(PAL_HANDLE* handle, const void* data, size_t size) {
                 hdl->sock.conn = (PAL_PTR)hdl + hdlsz + s2;
             break;
         }
-        case pal_type_process:
-        case pal_type_eventfd:
+        case PAL_TYPE_PROCESS:
+        case PAL_TYPE_EVENTFD:
             break;
         default:
             return -PAL_ERROR_BADHANDLE;
@@ -209,7 +209,7 @@ int handle_deserialize(PAL_HANDLE* handle, const void* data, size_t size) {
  * \return           0 on success, negative PAL error code otherwise.
  */
 int _DkSendHandle(PAL_HANDLE hdl, PAL_HANDLE cargo) {
-    if (!IS_HANDLE_TYPE(hdl, process))
+    if (HANDLE_HDR(hdl)->type != PAL_TYPE_PROCESS)
         return -PAL_ERROR_BADHANDLE;
 
     /* serialize cargo handle into a blob hdl_data */
@@ -240,7 +240,7 @@ int _DkSendHandle(PAL_HANDLE hdl, PAL_HANDLE cargo) {
     message_hdr.msg_iov    = iov;
     message_hdr.msg_iovlen = 1;
 
-    ret = INLINE_SYSCALL(sendmsg, 3, fd, &message_hdr, MSG_NOSIGNAL);
+    ret = DO_SYSCALL(sendmsg, fd, &message_hdr, MSG_NOSIGNAL);
     if (ret < 0) {
         free(hdl_data);
         return unix_to_pal_error(ret);
@@ -265,7 +265,7 @@ int _DkSendHandle(PAL_HANDLE hdl, PAL_HANDLE cargo) {
     message_hdr.msg_iov    = iov;
     message_hdr.msg_iovlen = 1;
 
-    ret = INLINE_SYSCALL(sendmsg, 3, fd, &message_hdr, 0);
+    ret = DO_SYSCALL(sendmsg, fd, &message_hdr, 0);
     if (ret < 0) {
         free(hdl_data);
         return unix_to_pal_error(ret);
@@ -283,7 +283,7 @@ int _DkSendHandle(PAL_HANDLE hdl, PAL_HANDLE cargo) {
  * \return           0 on success, negative PAL error code otherwise.
  */
 int _DkReceiveHandle(PAL_HANDLE hdl, PAL_HANDLE* cargo) {
-    if (!IS_HANDLE_TYPE(hdl, process))
+    if (HANDLE_HDR(hdl)->type != PAL_TYPE_PROCESS)
         return -PAL_ERROR_BADHANDLE;
 
     ssize_t ret;
@@ -299,7 +299,7 @@ int _DkReceiveHandle(PAL_HANDLE hdl, PAL_HANDLE* cargo) {
     message_hdr.msg_iov    = iov;
     message_hdr.msg_iovlen = 1;
 
-    ret = INLINE_SYSCALL(recvmsg, 3, fd, &message_hdr, 0);
+    ret = DO_SYSCALL(recvmsg, fd, &message_hdr, 0);
     if (ret < 0)
         return unix_to_pal_error(ret);
 
@@ -330,7 +330,7 @@ int _DkReceiveHandle(PAL_HANDLE hdl, PAL_HANDLE* cargo) {
     message_hdr.msg_iov    = iov;
     message_hdr.msg_iovlen = 1;
 
-    ret = INLINE_SYSCALL(recvmsg, 3, fd, &message_hdr, 0);
+    ret = DO_SYSCALL(recvmsg, fd, &message_hdr, 0);
     if (ret < 0)
         return unix_to_pal_error(ret);
 
@@ -366,13 +366,13 @@ int _DkInitDebugStream(const char* path) {
     int ret;
 
     if (g_log_fd != PAL_LOG_DEFAULT_FD) {
-        ret = INLINE_SYSCALL(close, 1, g_log_fd);
+        ret = DO_SYSCALL(close, g_log_fd);
         g_log_fd = PAL_LOG_DEFAULT_FD;
         if (ret < 0)
             return unix_to_pal_error(ret);
     }
 
-    ret = INLINE_SYSCALL(open, 3, path, O_WRONLY | O_APPEND | O_CREAT, PERM_rw_______);
+    ret = DO_SYSCALL(open, path, O_WRONLY | O_APPEND | O_CREAT, PERM_rw_______);
     if (ret < 0)
         return unix_to_pal_error(ret);
     g_log_fd = ret;

@@ -57,11 +57,9 @@ static struct pseudo_node* pseudo_find(struct shim_dentry* dent) {
 
     if (!dent->parent) {
         /* This is the filesystem root */
-        node = pseudo_find_root(qstrgetstr(&dent->mount->uri));
+        node = pseudo_find_root(dent->mount->uri);
         goto out;
     }
-
-    const char* name = qstrgetstr(&dent->name);
 
     /* Recursive call: find the node for parent */
     struct pseudo_node* parent_node = pseudo_find(dent->parent);
@@ -73,10 +71,10 @@ static struct pseudo_node* pseudo_find(struct shim_dentry* dent) {
     /* Look for a child node with matching name */
     assert(parent_node->type == PSEUDO_DIR);
     LISTP_FOR_EACH_ENTRY(node, &parent_node->dir.children, siblings) {
-        if (node->name && strcmp(name, node->name) == 0) {
+        if (node->name && strcmp(dent->name, node->name) == 0) {
             goto out;
         }
-        if (node->name_exists && node->name_exists(dent->parent, name)) {
+        if (node->name_exists && node->name_exists(dent->parent, dent->name)) {
             goto out;
         }
     }
@@ -94,20 +92,6 @@ static int pseudo_mount(const char* uri, void** mount_data) {
     __UNUSED(uri);
     __UNUSED(mount_data);
     return 0;
-}
-
-/* The `modify` callback for string handle. Invokes `save` from user. */
-static int pseudo_modify(struct shim_handle* hdl) {
-    assert(hdl->type == TYPE_STR);
-    assert(hdl->dentry);
-
-    struct pseudo_node* node = pseudo_find(hdl->dentry);
-    if (!node)
-        return -ENOENT;
-
-    assert(node->type == PSEUDO_STR);
-    assert(node->str.save);
-    return node->str.save(hdl->dentry, hdl->info.str.data->str, hdl->info.str.data->len);
 }
 
 static int pseudo_open(struct shim_handle* hdl, struct shim_dentry* dent, int flags) {
@@ -138,20 +122,10 @@ static int pseudo_open(struct shim_handle* hdl, struct shim_dentry* dent, int fl
                 str = NULL;
             }
 
-            struct shim_str_data* data = calloc(1, sizeof(struct shim_str_data));
-            if (!data) {
-                free(str);
-                return -ENOMEM;
-            }
-
             hdl->type = TYPE_STR;
-            hdl->info.str.data = data;
-            hdl->info.str.data->str = str;
-            hdl->info.str.data->len = len;
-            hdl->info.str.data->buf_size = len;
-            if (node->str.save)
-                hdl->info.str.data->modify = &pseudo_modify;
-            hdl->info.str.ptr = str;
+            mem_file_init(&hdl->info.str.mem, str, len);
+            hdl->info.str.dirty = false;
+            hdl->info.str.pos = 0;
             break;
         }
 
@@ -178,11 +152,9 @@ static int pseudo_lookup(struct shim_dentry* dent) {
 
     switch (node->type) {
         case PSEUDO_DIR:
-            dent->state |= DENTRY_ISDIRECTORY;
             dent->type = S_IFDIR;
             break;
         case PSEUDO_LINK:
-            dent->state |= DENTRY_ISLINK;
             dent->type = S_IFLNK;
             break;
         case PSEUDO_STR:
@@ -193,11 +165,6 @@ static int pseudo_lookup(struct shim_dentry* dent) {
             break;
     }
     dent->perm = node->perm;
-    return 0;
-}
-
-static int pseudo_mode(struct shim_dentry* dent, mode_t* mode) {
-    *mode = dent->type | dent->perm;
     return 0;
 }
 
@@ -253,8 +220,10 @@ static int pseudo_hstat(struct shim_handle* handle, struct stat* buf) {
     return pseudo_stat(handle->dentry, buf);
 }
 
-static int pseudo_follow_link(struct shim_dentry* dent, struct shim_qstr* link) {
+static int pseudo_follow_link(struct shim_dentry* dent, char** out_target) {
     struct pseudo_node* node = pseudo_find(dent);
+    char* target;
+
     if (!node)
         return -ENOENT;
 
@@ -262,22 +231,19 @@ static int pseudo_follow_link(struct shim_dentry* dent, struct shim_qstr* link) 
         return -EINVAL;
 
     if (node->link.follow_link) {
-        char* target;
         int ret = node->link.follow_link(dent, &target);
         if (ret < 0)
             return ret;
-        if (!qstrsetstr(link, target, strlen(target))) {
-            free(target);
-            return -ENOMEM;
-        }
-        free(target);
+        *out_target = target;
         return 0;
     }
 
     assert(node->link.target);
-    if (!qstrsetstr(link, node->link.target, strlen(node->link.target)))
+    target = strdup(node->link.target);
+    if (!target)
         return -ENOMEM;
 
+    *out_target = target;
     return 0;
 }
 
@@ -312,8 +278,15 @@ static ssize_t pseudo_read(struct shim_handle* hdl, void* buf, size_t size) {
     if (!node)
         return -ENOENT;
     switch (node->type) {
-        case PSEUDO_STR:
-            return str_read(hdl, buf, size);
+        case PSEUDO_STR: {
+            assert(hdl->type == TYPE_STR);
+            lock(&hdl->lock);
+            ssize_t ret = mem_file_read(&hdl->info.str.mem, hdl->info.str.pos, buf, size);
+            if (ret > 0)
+                hdl->info.str.pos += ret;
+            unlock(&hdl->lock);
+            return ret;
+        }
 
         case PSEUDO_DEV:
             if (!node->dev.dev_ops.read)
@@ -331,8 +304,17 @@ static ssize_t pseudo_write(struct shim_handle* hdl, const void* buf, size_t siz
     if (!node)
         return -ENOENT;
     switch (node->type) {
-        case PSEUDO_STR:
-            return str_write(hdl, buf, size);
+        case PSEUDO_STR: {
+            assert(hdl->type == TYPE_STR);
+            lock(&hdl->lock);
+            ssize_t ret = mem_file_write(&hdl->info.str.mem, hdl->info.str.pos, buf, size);
+            if (ret > 0) {
+                hdl->info.str.pos += ret;
+                hdl->info.str.dirty = true;
+            }
+            unlock(&hdl->lock);
+            return ret;
+        }
 
         case PSEUDO_DEV:
             if (!node->dev.dev_ops.write)
@@ -344,14 +326,25 @@ static ssize_t pseudo_write(struct shim_handle* hdl, const void* buf, size_t siz
     }
 }
 
-static off_t pseudo_seek(struct shim_handle* hdl, off_t offset, int whence) {
+static file_off_t pseudo_seek(struct shim_handle* hdl, file_off_t offset, int whence) {
+    file_off_t ret;
+
     assert(hdl->dentry);
     struct pseudo_node* node = pseudo_find(hdl->dentry);
     if (!node)
         return -ENOENT;
     switch (node->type) {
-        case PSEUDO_STR:
-            return str_seek(hdl, offset, whence);
+        case PSEUDO_STR: {
+            lock(&hdl->lock);
+            file_off_t pos = hdl->info.str.pos;
+            ret = generic_seek(pos, hdl->info.str.mem.size, offset, whence, &pos);
+            if (ret == 0) {
+                hdl->info.str.pos = pos;
+                ret = pos;
+            }
+            unlock(&hdl->lock);
+            return ret;
+        }
 
         case PSEUDO_DEV:
             if (!node->dev.dev_ops.seek)
@@ -363,14 +356,20 @@ static off_t pseudo_seek(struct shim_handle* hdl, off_t offset, int whence) {
     }
 }
 
-static int pseudo_truncate(struct shim_handle* hdl, off_t size) {
+static int pseudo_truncate(struct shim_handle* hdl, file_off_t size) {
     assert(hdl->dentry);
     struct pseudo_node* node = pseudo_find(hdl->dentry);
     if (!node)
         return -ENOENT;
     switch (node->type) {
         case PSEUDO_STR:
-            return str_truncate(hdl, size);
+            assert(hdl->type == TYPE_STR);
+            lock(&hdl->lock);
+            int ret = mem_file_truncate(&hdl->info.str.mem, size);
+            if (ret == 0)
+                hdl->info.str.dirty = true;
+            unlock(&hdl->lock);
+            return ret;
 
         case PSEUDO_DEV:
             if (!node->dev.dev_ops.truncate)
@@ -382,6 +381,20 @@ static int pseudo_truncate(struct shim_handle* hdl, off_t size) {
     }
 }
 
+static int pseudo_str_flush(struct pseudo_node* node, struct shim_handle* hdl) {
+    assert(locked(&hdl->lock));
+    assert(hdl->type == TYPE_STR);
+
+    if (hdl->info.str.dirty && node->str.save) {
+        struct shim_mem_file* mem = &hdl->info.str.mem;
+        int ret = node->str.save(hdl->dentry, mem->buf, mem->size);
+        if (ret < 0)
+            return ret;
+    }
+    hdl->info.str.dirty = false;
+    return 0;
+}
+
 static int pseudo_flush(struct shim_handle* hdl) {
     assert(hdl->dentry);
     struct pseudo_node* node = pseudo_find(hdl->dentry);
@@ -389,7 +402,7 @@ static int pseudo_flush(struct shim_handle* hdl) {
         return -ENOENT;
     switch (node->type) {
         case PSEUDO_STR:
-            return str_flush(hdl);
+            return pseudo_str_flush(node, hdl);
 
         case PSEUDO_DEV:
             if (!node->dev.dev_ops.flush)
@@ -408,27 +421,13 @@ static int pseudo_close(struct shim_handle* hdl) {
         return -ENOENT;
     switch (node->type) {
         case PSEUDO_STR: {
-            /*
-             * TODO: we don't use `str_close` here, but free the handle data ourselves. This is
-             * because `str_close` also attempts to free the dentry data (`hdl->dentry->data`), and
-             * pseudofs uses this field for other purposes.
-             *
-             * The `str_*` set of functions should probably work differently, but that requires
-             * rewriting tmpfs as well.
-             */
-            int ret = 0;
-            if (hdl->flags & (O_WRONLY | O_RDWR)) {
-                int ret = str_flush(hdl);
-                if (ret < 0) {
-                    log_debug("str_flush() failed, proceeding with close");
-                }
+            lock(&hdl->lock);
+            int ret = pseudo_str_flush(node, hdl);
+            if (ret < 0) {
+                log_debug("pseudo_str_flush() failed, proceeding with close");
             }
-
-            if (hdl->info.str.data) {
-                free(hdl->info.str.data->str);
-                free(hdl->info.str.data);
-                hdl->info.str.data = NULL;
-            }
+            mem_file_destroy(&hdl->info.str.mem);
+            unlock(&hdl->lock);
             return ret;
         }
 
@@ -442,25 +441,28 @@ static int pseudo_close(struct shim_handle* hdl) {
     }
 }
 
-static off_t pseudo_poll(struct shim_handle* hdl, int poll_type) {
+static int pseudo_poll(struct shim_handle* hdl, int poll_type) {
     assert(hdl->dentry);
     struct pseudo_node* node = pseudo_find(hdl->dentry);
     if (!node)
         return -ENOENT;
     switch (node->type) {
-        case PSEUDO_DEV: {
-            if (poll_type == FS_POLL_SZ)
-                return 0;
+        case PSEUDO_STR: {
+            assert(hdl->type == TYPE_STR);
+            lock(&hdl->lock);
+            int ret = mem_file_poll(&hdl->info.str.mem, hdl->info.str.pos, poll_type);
+            unlock(&hdl->lock);
+            return ret;
+        }
 
-            off_t ret = 0;
+        case PSEUDO_DEV: {
+            int ret = 0;
             if ((poll_type & FS_POLL_RD) && node->dev.dev_ops.read)
                 ret |= FS_POLL_RD;
             if ((poll_type & FS_POLL_WR) && node->dev.dev_ops.write)
                 ret |= FS_POLL_WR;
             return ret;
         }
-        case PSEUDO_STR:
-            return str_poll(hdl, poll_type);
 
         default:
             return -ENOSYS;
@@ -550,7 +552,6 @@ struct shim_fs_ops pseudo_fs_ops = {
 struct shim_d_ops pseudo_d_ops = {
     .open        = &pseudo_open,
     .lookup      = &pseudo_lookup,
-    .mode        = &pseudo_mode,
     .readdir     = &pseudo_readdir,
     .stat        = &pseudo_stat,
     .follow_link = &pseudo_follow_link,

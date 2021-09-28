@@ -13,6 +13,8 @@ CFLAGS += -fPIC -fno-builtin -Wextra
 #        e.g. PAL regression tests (in particular, avl_tree_test.c)
 CFLAGS += -fno-stack-protector
 
+CFLAGS += $(CFLAGS_SANITIZERS)
+
 CRYPTO_PROVIDER ?= mbedtls
 
 # Select which crypto adapter you want to use here. This has to match the #define in crypto.h.
@@ -46,6 +48,15 @@ crypto_mbedtls_library_objs += \
 endif
 
 objs += $(crypto_mbedtls_library_objs)
+
+# Compile mbedtls without UBSan. UBSan makes the code much slower, and consumes a lot of stack:
+# `mbedtls_internal_sha256_process` (as compiled by clang) takes up over 20 KB, overflowing LibOS
+# stack.
+ifeq ($(UBSAN),1)
+$(crypto_mbedtls_library_objs): CFLAGS += -fno-sanitize=undefined
+$(addprefix $(target),$(crypto_mbedtls_library_objs)): CFLAGS += -fno-sanitize=undefined
+endif
+
 endif
 
 MBEDTLS_VERSION ?= 2.26.0
@@ -103,6 +114,10 @@ objs += \
 	string/utils.o \
 	toml.o
 
+ifeq ($(UBSAN),1)
+objs += ubsan.o
+endif
+
 $(addprefix $(target),crypto/adapters/mbedtls_adapter.o): crypto/mbedtls/library/aes.c
 
 ifeq ($(CRYPTO_PROVIDER),mbedtls)
@@ -138,15 +153,15 @@ uthash.patched: uthash.h
 	cp uthash.h ../include/uthash.h
 	touch $@
 
-TOML_COMMIT ?= 5be06807ad5f2230cad99e15380c4f4076c9dd83
+TOML_COMMIT ?= 208203af46bdbdb29ba199660ed78d09c220b6c5
 TOML_H_URI ?= \
 	https://raw.githubusercontent.com/cktan/tomlc99/$(TOML_COMMIT)/toml.h \
 	https://packages.grapheneproject.io/distfiles/tomlc99-$(TOML_COMMIT)/toml.h
-TOML_H_CHECKSUM ?= e79d6d272576561e1b46ee001b0dd6b554330843e6fc7c658a548c659f282ac5
+TOML_H_CHECKSUM ?= 2156347bb23ac717aaa1260eef34daeb87565fc2c647e2bc92fa691787fc210c
 TOML_C_URI ?= \
 	https://raw.githubusercontent.com/cktan/tomlc99/$(TOML_COMMIT)/toml.c \
 	https://packages.grapheneproject.io/distfiles/tomlc99-$(TOML_COMMIT)/toml.c
-TOML_C_CHECKSUM ?= c21a546ab767a7e40d4f65df179d70357059c15e4439e1980d791625655fbbc6
+TOML_C_CHECKSUM ?= 98115b4483f4c23f6f22b19f1fb86e2a0e3855c02aa1eed21d8a19f9afbc6c35
 
 toml.h:
 	../../Scripts/download --output $@ --sha256 $(TOML_H_CHECKSUM) $(foreach mirror,$(TOML_H_URI),--url $(mirror))

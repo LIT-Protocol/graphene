@@ -4,7 +4,6 @@
 
 #include <stdbool.h>
 #include <stddef.h>
-#include <sys/types.h>
 
 #include "linux_types.h"
 #include "pal.h"
@@ -167,7 +166,6 @@ typedef struct {
 } ms_ocall_getdents_t;
 
 typedef struct {
-    unsigned int ms_pid;
     int ms_stream_fd;
     size_t ms_nargs;
     const char* ms_args[];

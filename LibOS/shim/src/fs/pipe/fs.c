@@ -93,8 +93,8 @@ static int pipe_hstat(struct shim_handle* hdl, struct stat* stat) {
     return 0;
 }
 
-static off_t pipe_poll(struct shim_handle* hdl, int poll_type) {
-    off_t ret = 0;
+static int pipe_poll(struct shim_handle* hdl, int poll_type) {
+    int ret = 0;
 
     assert(hdl->type == TYPE_PIPE);
     if (!hdl->info.pipe.ready_for_ops)
@@ -111,11 +111,6 @@ static off_t pipe_poll(struct shim_handle* hdl, int poll_type) {
     int query_ret = DkStreamAttributesQueryByHandle(hdl->pal_handle, &attr);
     if (query_ret < 0) {
         ret = pal_to_unix_errno(query_ret);
-        goto out;
-    }
-
-    if (poll_type == FS_POLL_SZ) {
-        ret = attr.pending_size;
         goto out;
     }
 
@@ -178,7 +173,7 @@ static int fifo_open(struct shim_handle* hdl, struct shim_dentry* dent, int flag
          * one end (read or write) in our emulation, so we treat such FIFOs as read-only. This
          * covers most apps seen in the wild (in particular, LTP apps). */
         log_warning("FIFO (named pipe) '%s' cannot be opened in read-write mode in Graphene. "
-                    "Treating it as read-only.", qstrgetstr(&dent->mount->path));
+                    "Treating it as read-only.", dent->mount->path);
         flags = O_RDONLY;
     }
 

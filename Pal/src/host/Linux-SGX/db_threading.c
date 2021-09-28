@@ -51,7 +51,8 @@ static PAL_IDX pal_assign_tid(void) {
  * g_thread_list, initializes its TCB/TLS, and jumps into the callback-to-run. Graphene uses GCC's
  * stack protector that looks for a canary at gs:[0x8], but this function starts with a default
  * canary and then updates it to a random one, so we disable stack protector here. */
-__attribute__((__optimize__("-fno-stack-protector"))) void pal_start_thread(void) {
+__attribute_no_stack_protector
+void pal_start_thread(void) {
     struct pal_handle_thread *new_thread = NULL, *tmp;
 
     spinlock_lock(&g_thread_list_lock);
@@ -97,7 +98,7 @@ int _DkThreadCreate(PAL_HANDLE* handle, int (*callback)(void*), const void* para
     PAL_HANDLE new_thread = malloc(HANDLE_SIZE(thread));
     if (!new_thread)
         return -PAL_ERROR_NOMEM;
-    SET_HANDLE_TYPE(new_thread, thread);
+    init_handle_hdr(HANDLE_HDR(new_thread), PAL_TYPE_THREAD);
     /*
      * tid will be filled later by pal_start_thread()
      * tid is cleared to avoid random value here.

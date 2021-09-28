@@ -111,10 +111,10 @@ void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end) {
         if (start_addr >= end_addr)
             INIT_FAIL(PAL_ERROR_NOMEM, "no user memory available");
 
-        void* mem = (void*)ARCH_MMAP(start_addr, g_pal_state.alloc_align, PROT_NONE,
-                                     MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-        if (!IS_ERR_P(mem)) {
-            INLINE_SYSCALL(munmap, 2, mem, g_pal_state.alloc_align);
+        void* mem = (void*)DO_SYSCALL(mmap, start_addr, g_pal_state.alloc_align, PROT_NONE,
+                                      MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (!IS_PTR_ERR(mem)) {
+            DO_SYSCALL(munmap, mem, g_pal_state.alloc_align);
             if (mem == start_addr)
                 break;
         }
@@ -124,10 +124,6 @@ void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end) {
 
     *end   = (PAL_PTR)end_addr;
     *start = (PAL_PTR)start_addr;
-}
-
-PAL_NUM _DkGetProcessId(void) {
-    return g_linux_state.process_id;
 }
 
 #include "dynamic_link.h"
@@ -148,7 +144,7 @@ noreturn static void print_usage_and_exit(const char* argv_0) {
 
 /* Graphene uses GCC's stack protector that looks for a canary at gs:[0x8], but this function starts
  * with no TCB in the GS register, so we disable stack protector here */
-__attribute__((__optimize__("-fno-stack-protector")))
+__attribute_no_stack_protector
 noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     __UNUSED(fini_callback);  // TODO: We should call `fini_callback` at the end.
     int ret;
@@ -159,8 +155,19 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     dummy_tcb_for_stack_protector.common.self = &dummy_tcb_for_stack_protector.common;
     pal_tcb_set_stack_canary(&dummy_tcb_for_stack_protector.common, STACK_PROTECTOR_CANARY_DEFAULT);
     ret = pal_set_tcb(&dummy_tcb_for_stack_protector.common);
-    if (ret < 0)
-        INIT_FAIL(unix_to_pal_error(-ret), "pal_set_tcb() failed");
+    if (ret < 0) {
+        /* We failed to install a TCB (and haven't applied relocations yet), so no other code will
+         * work anyway */
+        DO_SYSCALL(exit_group, PAL_ERROR_DENIED);
+        die_or_inf_loop();
+    }
+
+    /* Relocate PAL itself (note that this is required to run `log_error`) */
+    g_pal_map.l_addr = elf_machine_load_address();
+    g_pal_map.l_name = "libpal.so"; // to be overriden later
+    elf_get_dynamic_info((void*)g_pal_map.l_addr + elf_machine_dynamic(), g_pal_map.l_info,
+                         g_pal_map.l_addr);
+    ELF_DYNAMIC_RELOCATE(&g_pal_map);
 
     uint64_t start_time;
     ret = _DkSystemTimeQuery(&start_time);
@@ -179,18 +186,14 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     if (argc < 4)
         print_usage_and_exit(argv[0]);  // may be NULL!
 
+    /* Now that we have `argv`, set name for PAL map */
+    g_pal_map.l_name = argv[0];
+
     // Are we the first in this Graphene's namespace?
     bool first_process = !strcmp(argv[2], "init");
     if (!first_process && strcmp(argv[2], "child")) {
         print_usage_and_exit(argv[0]);
     }
-
-    g_pal_map.l_addr = elf_machine_load_address();
-    g_pal_map.l_name = argv[0];
-    elf_get_dynamic_info((void*)g_pal_map.l_addr + elf_machine_dynamic(), g_pal_map.l_info,
-                         g_pal_map.l_addr);
-
-    ELF_DYNAMIC_RELOCATE(&g_pal_map);
 
     g_linux_state.host_environ = envp;
 
@@ -205,8 +208,8 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     PAL_HANDLE first_thread = malloc(HANDLE_SIZE(thread));
     if (!first_thread)
         INIT_FAIL(PAL_ERROR_NOMEM, "Out of memory");
-    SET_HANDLE_TYPE(first_thread, thread);
-    first_thread->thread.tid = INLINE_SYSCALL(gettid, 0);
+    init_handle_hdr(HANDLE_HDR(first_thread), PAL_TYPE_THREAD);
+    first_thread->thread.tid = DO_SYSCALL(gettid);
 
     void* alt_stack = calloc(1, ALT_STACK_SIZE);
     if (!alt_stack)
@@ -257,19 +260,14 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
         log_warning("vvar address range not preloaded, is your system missing vvar?!");
     }
 
-    if (!g_pal_sec.process_id)
-        g_pal_sec.process_id = INLINE_SYSCALL(getpid, 0);
-    g_linux_state.pid = g_pal_sec.process_id;
+    g_linux_state.pid = DO_SYSCALL(getpid);
 
     g_linux_state.uid = g_uid;
     g_linux_state.gid = g_gid;
-    g_linux_state.process_id = g_linux_state.pid;
-
-    if (!g_linux_state.parent_process_id)
-        g_linux_state.parent_process_id = g_linux_state.process_id;
 
     PAL_HANDLE parent = NULL;
     char* manifest = NULL;
+    uint64_t instance_id = 0;
     if (first_process) {
         const char* application_path = argv[3];
         char* manifest_path = alloc_concat(application_path, -1, ".manifest", -1);
@@ -283,7 +281,7 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     } else {
         // Children receive their argv and config via IPC.
         int parent_pipe_fd = atoi(argv[3]);
-        init_child_process(parent_pipe_fd, &parent, &manifest);
+        init_child_process(parent_pipe_fd, &parent, &manifest, &instance_id);
     }
     assert(manifest);
 
@@ -305,10 +303,10 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
         INIT_FAIL(PAL_ERROR_INVAL, "Cannot parse 'loader.pal_internal_mem_size'");
     }
 
-    void* internal_mem_addr = (void*)ARCH_MMAP(NULL, g_pal_internal_mem_size,
-                                               PROT_READ | PROT_WRITE,
-                                               MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    if (IS_ERR_P(internal_mem_addr)) {
+    void* internal_mem_addr = (void*)DO_SYSCALL(mmap, NULL, g_pal_internal_mem_size,
+                                                PROT_READ | PROT_WRITE,
+                                                MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (IS_PTR_ERR(internal_mem_addr)) {
         INIT_FAIL(PAL_ERROR_NOMEM, "Cannot allocate PAL internal memory pool");
     }
 
@@ -321,6 +319,5 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     g_pal_internal_mem_addr = internal_mem_addr;
 
     /* call to main function */
-    pal_main((PAL_NUM)g_linux_state.parent_process_id, parent, first_thread,
-             first_process ? argv + 3 : argv + 4, envp);
+    pal_main(instance_id, parent, first_thread, first_process ? argv + 3 : argv + 4, envp);
 }
